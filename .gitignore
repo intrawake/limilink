@@ -1,0 +1,10 @@
+/.*
+!/.gitignore
+!/.github/
+
+/dist/
+/session/
+/pdm.lock
+__pycache__/
+
+*.log

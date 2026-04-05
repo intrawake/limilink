@@ -1,0 +1,56 @@
+[project]
+name = "limilink"
+version = "0.1.0"
+description = "A web chat proxy to bridge the dreamscape persona via gemini-cli."
+readme = "README.md"
+license = { text = "0BSD" }
+authors = [
+  { name = "paprika-bot", email = "sockpaprika-git@intrawake.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.111.0",
+    "uvicorn>=0.29.0",
+    "httpx>=0.27.0",
+    "sxpb @ git+https://github.com/sxproto/sxpb-py.git@trunk",
+]
+
+[project.optional-dependencies]
+discord = ["discord-py>=2.3.2"]
+
+[project.urls]
+Homepage = "https://github.com/intrawake/limilink"
+Repository = "https://github.com/intrawake/limilink"
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["src", "."]
+testpaths = ["test"]
+
+[tool.pdm.scripts]
+server = { shell = "PYTHONPATH=src python src/server.py" }
+preset_server = { shell = "PYTHONPATH=src python src/server.py --config preset/config.sxpb" }
+discord_bot = { shell = "PYTHONPATH=src python demo/discord_bot.py" }
+preset_discord_bot = { shell = "LIMILINK_CONFIG=preset/config.sxpb PYTHONPATH=src python demo/discord_bot.py" }
+test = "pytest -q"
+check-format = "ruff check"
+check-type = "ty check"
+tidy = "ruff format"
+lint = {composite = ["check-format", "check-type"]}
+tidytest = {composite = ["test", "tidy", "lint"]}
+
+[tool.ty.environment]
+root = ["src", "test", "."]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "respx>=0.22.0",
+    "ruff",
+    "ty",
+]

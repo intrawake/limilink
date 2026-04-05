@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content">
+    <title>Limilink Proxy</title>
+    <style>
+        :root {
+            --bg-color: #1a1a1a;
+            --text-color: #e0e0e0;
+            --user-msg: #2d4263;
+            --bot-msg: #363636;
+            --accent: #ff6b6b;
+            --input-bg: #2a2a2a;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body, html {
+            height: 100%;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+        }
+
+        #app {
+            display: flex;
+            flex-direction: column;
+            height: 100dvh;
+            max-width: 800px;
+            margin: 0 auto;
+            position: relative;
+        }
+
+        header {
+            padding: 15px;
+            background-color: #111;
+            text-align: center;
+            border-bottom: 1px solid #333;
+            font-weight: bold;
+            letter-spacing: 1px;
+            flex-shrink: 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        header select {
+            background-color: var(--input-bg);
+            color: var(--text-color);
+            border: 1px solid #444;
+            padding: 5px;
+            border-radius: 4px;
+        }
+
+        #chat-container {
+            flex-grow: 1;
+            overflow-y: auto;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .message {
+            max-width: 95%;
+            padding: 12px 16px;
+            border-radius: 18px;
+            line-height: 1.5;
+            word-wrap: break-word;
+        }
+
+        .message.user {
+            align-self: flex-end;
+            background-color: var(--user-msg);
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.bot {
+            align-self: flex-start;
+            background-color: var(--bot-msg);
+            border-bottom-left-radius: 4px;
+        }
+        
+        .message pre {
+            background-color: #111;
+            padding: 10px;
+            border-radius: 5px;
+            overflow-x: auto;
+            margin-top: 10px;
+        }
+
+        .message code {
+            font-family: monospace;
+            font-size: 0.9em;
+        }
+
+        #input-area {
+            display: flex;
+            padding: 15px;
+            background-color: #111;
+            border-top: 1px solid #333;
+            gap: 10px;
+            flex-shrink: 0;
+            align-items: flex-end; /* Justify button to bottom */
+        }
+
+        #message-input {
+            flex-grow: 1;
+            padding: 12px;
+            border-radius: 12px;
+            border: 1px solid #444;
+            background-color: var(--input-bg);
+            color: var(--text-color);
+            font-size: 16px;
+            outline: none;
+            resize: none;
+            font-family: inherit;
+            min-height: 46px;
+            max-height: 150px;
+            overflow-y: auto;
+            line-height: 1.4;
+        }
+
+        #message-input:focus {
+            border-color: var(--accent);
+        }
+
+        #send-btn {
+            background-color: var(--accent);
+            color: #fff;
+            border: none;
+            border-radius: 24px;
+            padding: 0 20px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: opacity 0.2s;
+            height: 46px; /* explicitly match the min-height of the textarea */
+        }
+
+        #send-btn:hover {
+            opacity: 0.8;
+        }
+
+        #send-btn:disabled {
+            background-color: #555;
+            cursor: not-allowed;
+            color: #888;
+        }
+
+        .typing-indicator {
+            display: none;
+            align-self: flex-start;
+            background-color: transparent;
+            padding: 10px;
+            color: #888;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <header>
+            <span>LIMILINK</span>
+            <div style="display: flex; gap: 8px; align-items: center;">
+                <button id="del-session-btn" style="background:var(--accent); border:none; color:white; padding:8px 12px; border-radius:4px; font-weight:bold; font-size:16px;">X</button>
+                <select id="session-select" style="padding: 8px; font-size: 14px;">
+                </select>
+                <button id="new-session-btn" style="background:var(--user-msg); border:none; color:white; padding:8px 12px; border-radius:4px; font-weight:bold; font-size:16px;">+</button>
+            </div>
+        </header>
+        <div id="chat-container">
+            <div class="message bot">System active. Dreaming online. Standing by.</div>
+        </div>
+        <div id="typing" class="typing-indicator">Paprika is thinking...</div>
+        <div id="input-area">
+            <textarea id="message-input" placeholder="Enter the dreamscape..." rows="1"></textarea>
+            <button id="send-btn">Send</button>
+        </div>
+    </div>
+
+    <script>
+        const chatContainer = document.getElementById('chat-container');
+        const messageInput = document.getElementById('message-input');
+        const sendBtn = document.getElementById('send-btn');
+        const typingIndicator = document.getElementById('typing');
+        const sessionSelect = document.getElementById('session-select');
+        const newSessionBtn = document.getElementById('new-session-btn');
+        const delSessionBtn = document.getElementById('del-session-btn');
+
+        let currentSession = "default";
+        const inFlightSessions = new Set();
+        let isScrolledToBottom = true;
+
+        chatContainer.addEventListener('scroll', () => {
+            isScrolledToBottom = Math.abs(chatContainer.scrollHeight - chatContainer.clientHeight - chatContainer.scrollTop) < 10;
+        });
+
+        // Trigger a scroll calculation when the visual viewport resizes (like when the keyboard opens)
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', () => {
+                if (isScrolledToBottom) {
+                    chatContainer.scrollTop = chatContainer.scrollHeight;
+                }
+            });
+        }
+
+        function generateSessionName() {
+            const now = new Date();
+            const yyyy = now.getFullYear();
+            const mm = String(now.getMonth() + 1).padStart(2, '0');
+            const dd = String(now.getDate()).padStart(2, '0');
+            const HH = String(now.getHours()).padStart(2, '0');
+            const MM = String(now.getMinutes()).padStart(2, '0');
+            const SS = String(now.getSeconds()).padStart(2, '0');
+            return `session_${yyyy}${mm}${dd}_${HH}${MM}${SS}`;
+        }
+
+        async function fetchSessions() {
+            try {
+                const res = await fetch('/sessions');
+                const data = await res.json();
+                sessionSelect.innerHTML = '';
+                if (data.sessions.length === 0) {
+                    const newName = generateSessionName();
+                    await fetch('/sessions/' + newName, { method: 'POST' });
+                    data.sessions = [newName];
+                }
+                data.sessions.forEach(s => {
+                    const opt = document.createElement('option');
+                    opt.value = s;
+                    opt.textContent = s;
+                    sessionSelect.appendChild(opt);
+                });
+                
+                // Try to load last selected session from localStorage
+                const savedSession = localStorage.getItem('limilink_last_session');
+                if (savedSession && data.sessions.includes(savedSession)) {
+                    currentSession = savedSession;
+                } else if (!data.sessions.includes(currentSession) || currentSession === "") {
+                    currentSession = data.sessions[0];
+                }
+                
+                sessionSelect.value = currentSession;
+                localStorage.setItem('limilink_last_session', currentSession);
+                loadHistory();
+            } catch (err) {
+                console.error("Failed to load sessions", err);
+            }
+        }
+
+        newSessionBtn.addEventListener('click', async () => {
+            const name = generateSessionName();
+            await fetch('/sessions/' + name, { method: 'POST' });
+            currentSession = name;
+            localStorage.setItem('limilink_last_session', currentSession);
+            await fetchSessions();
+        });
+
+        delSessionBtn.addEventListener('click', async () => {
+            if (confirm("Delete session " + currentSession + "?")) {
+                await fetch('/sessions/' + currentSession, { method: 'DELETE' });
+                currentSession = ""; // It will be reassigned in fetchSessions
+                localStorage.removeItem('limilink_last_session');
+                await fetchSessions();
+            }
+        });
+
+        async function loadHistory() {
+            chatContainer.innerHTML = '';
+            updateInputState();
+
+            try {
+                const res = await fetch(`/sessions/${currentSession}/history`);
+                const data = await res.json();
+                
+                if (data.history && data.history.length > 0) {
+                    data.history.forEach(item => {
+                        let formattedContent = item.content
+                            .replace(/</g, '&lt;')
+                            .replace(/>/g, '&gt;')
+                            .replace(/\n/g, '<br>')
+                            .replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
+                        const msgHtml = `<div class="message ${item.role}">${formattedContent}</div>`;
+                        chatContainer.insertAdjacentHTML('beforeend', msgHtml);
+                    });
+                } else {
+                    chatContainer.innerHTML = '<div class="message bot">System active. Dreaming online. Standing by.</div>';
+                }
+            } catch (err) {
+                console.error("Failed to load history", err);
+                chatContainer.innerHTML = '<div class="message bot">Error loading history from server.</div>';
+            }
+            
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        function updateInputState() {
+            if (inFlightSessions.has(currentSession)) {
+                sendBtn.disabled = true;
+                typingIndicator.style.display = 'block';
+            } else {
+                sendBtn.disabled = false;
+                typingIndicator.style.display = 'none';
+            }
+        }
+
+        sessionSelect.addEventListener('change', (e) => {
+            currentSession = e.target.value;
+            localStorage.setItem('limilink_last_session', currentSession);
+            loadHistory();
+        });
+
+        function appendMessageToSession(targetSession, content, sender) {
+            let formattedContent = content
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/\n/g, '<br>')
+                .replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
+            
+            const msgHtml = `<div class="message ${sender}">${formattedContent}</div>`;
+
+            if (targetSession === currentSession) {
+                // Append to current DOM
+                chatContainer.insertAdjacentHTML('beforeend', msgHtml);
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+            }
+            // Background sessions rely on server history, so we don't need localStorage here.
+        }
+
+        async function sendMessage() {
+            const text = messageInput.value.trim();
+            if (!text) return;
+
+            const targetSession = currentSession;
+
+            // 1. Add User Message
+            appendMessageToSession(targetSession, text, 'user');
+            
+            if (targetSession === currentSession) {
+                messageInput.value = '';
+                messageInput.style.height = 'auto'; // Reset height after sending
+            }
+
+            inFlightSessions.add(targetSession);
+            updateInputState();
+
+            try {
+                // 2. Call API
+                const response = await fetch('/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        message: text,
+                        session_id: targetSession 
+                    })
+                });
+
+                const data = await response.json();
+
+                // 3. Add Bot Message
+                if (response.ok) {
+                    appendMessageToSession(targetSession, data.reply, 'bot');
+                } else {
+                    appendMessageToSession(targetSession, 'Error: ' + (data.detail || 'Unknown server error'), 'bot');
+                }
+            } catch (err) {
+                appendMessageToSession(targetSession, 'Network Error: Failed to reach the waking world.', 'bot');
+                console.error(err);
+            } finally {
+                // 4. Reset UI State
+                inFlightSessions.delete(targetSession);
+                if (currentSession === targetSession) {
+                    updateInputState();
+                }
+            }
+        }
+
+        sendBtn.addEventListener('click', sendMessage);
+
+        messageInput.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = (this.scrollHeight) + 'px';
+            if (this.value === '') {
+                this.style.height = 'auto';
+            }
+        });
+
+        messageInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                const isMobile = window.matchMedia("(pointer: coarse)").matches;
+                
+                if (isMobile) {
+                    // On mobile, let Enter do its default (newline)
+                    // The user will tap the "Send" button to send
+                    return;
+                } else {
+                    // On desktop
+                    if (e.shiftKey) {
+                        // Shift+Enter: let it insert a newline
+                        return;
+                    } else {
+                        // Regular Enter: prevent newline and send
+                        e.preventDefault();
+                        if (!sendBtn.disabled) sendMessage();
+                    }
+                }
+            }
+        });
+
+        // Initialize
+        fetchSessions();
+    </script>
+</body>
+</html>
