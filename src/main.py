@@ -244,6 +244,62 @@ async def chat_endpoint(request: ChatRequest):
             append_to_history(session_path, "bot", reply)
             return ChatResponse(reply=reply)
 
+        # Handle env command
+        if request.message.startswith("!env"):
+            append_to_history(session_path, "user", request.message)
+            parts = request.message.split(maxsplit=2)
+
+            env_overrides_path = os.path.join(session_path, ".env_overrides.json")
+            env_overrides = {}
+            if os.path.exists(env_overrides_path):
+                try:
+                    with open(env_overrides_path, "r") as f:
+                        env_overrides = json.load(f)
+                except Exception:
+                    pass
+
+            if len(parts) == 1:
+                reply = "Usage: !env <VAR_NAME> [VALUE]"
+                append_to_history(session_path, "bot", reply)
+                return ChatResponse(reply=reply)
+
+            var_name = parts[1]
+            if len(parts) == 2:
+                # To show the current value, we need to build the base env
+                env = os.environ.copy()
+                cfg_env = cfg.get("gemini_env", [])
+                if isinstance(cfg_env, list):
+                    for env_var in cfg_env:
+                        if (
+                            isinstance(env_var, dict)
+                            and "name" in env_var
+                            and "value" in env_var
+                        ):
+                            env[env_var["name"]] = env_var["value"]
+                cfg_env_dict = cfg.get("gemini_env_dict", {})
+                if isinstance(cfg_env_dict, dict):
+                    for name, value in cfg_env_dict.items():
+                        if isinstance(value, str):
+                            env[name] = value
+
+                env.update(env_overrides)
+                current_val = env.get(var_name)
+
+                if current_val is None:
+                    reply = f"{var_name} is not set"
+                else:
+                    reply = f"{var_name}={current_val}"
+                append_to_history(session_path, "bot", reply)
+                return ChatResponse(reply=reply)
+
+            var_value = parts[2]
+            env_overrides[var_name] = var_value
+            with open(env_overrides_path, "w") as f:
+                json.dump(env_overrides, f)
+            reply = f"Environment variable {var_name} set to: {var_value}"
+            append_to_history(session_path, "bot", reply)
+            return ChatResponse(reply=reply)
+
         args = cfg.get(
             "gemini_args",
             [
@@ -307,6 +363,17 @@ async def chat_endpoint(request: ChatRequest):
             env["GEMINI_SYSTEM_MD"] = os.path.normpath(
                 os.path.join(config_dir, env["GEMINI_SYSTEM_MD"])
             )
+
+        # Apply session environment overrides
+        env_overrides_path = os.path.join(session_path, ".env_overrides.json")
+        if os.path.exists(env_overrides_path):
+            try:
+                with open(env_overrides_path, "r") as f:
+                    env_overrides = json.load(f)
+                for k, v in env_overrides.items():
+                    env[k] = v
+            except Exception:
+                pass
 
         # Append user message to history
         append_to_history(session_path, "user", request.message)

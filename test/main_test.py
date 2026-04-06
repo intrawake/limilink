@@ -320,3 +320,51 @@ async def test_env_vars_dict_only(mock_exec, mock_load_config):
 
     env = mock_exec.call_args[1]["env"]
     assert env["MY_VAR"] == "my_val"
+
+
+@pytest.mark.asyncio
+@patch("main.asyncio.create_subprocess_exec")
+async def test_env_command(mock_exec):
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"mocked response", b"")
+    mock_exec.return_value = mock_process
+
+    session_id = "test_env_command_session"
+
+    with TestClient(app) as c:
+        # Check an unset env var
+        response = c.post(
+            "/chat", json={"message": "!env SOME_TEST_VAR", "session_id": session_id}
+        )
+        assert response.status_code == 200
+        assert "SOME_TEST_VAR is not set" in response.json()["reply"]
+
+        # Set an env var
+        response = c.post(
+            "/chat",
+            json={
+                "message": "!env SOME_TEST_VAR test_value_123",
+                "session_id": session_id,
+            },
+        )
+        assert response.status_code == 200
+        assert (
+            "Environment variable SOME_TEST_VAR set to: test_value_123"
+            in response.json()["reply"]
+        )
+
+        # Verify it is set
+        response = c.post(
+            "/chat", json={"message": "!env SOME_TEST_VAR", "session_id": session_id}
+        )
+        assert response.json()["reply"] == "SOME_TEST_VAR=test_value_123"
+
+        # Verify next chat uses the new env var
+        response = c.post("/chat", json={"message": "hello", "session_id": session_id})
+        assert response.status_code == 200
+
+        # Check command
+        mock_exec.assert_called_once()
+        env = mock_exec.call_args[1]["env"]
+        assert env.get("SOME_TEST_VAR") == "test_value_123"
