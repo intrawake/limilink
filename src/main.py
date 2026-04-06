@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import asyncio
 import json
+import signal
 from typing import Any
 import sxpb
 from fastapi import FastAPI, HTTPException
@@ -11,6 +12,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 app = FastAPI()
+
+# Global tracker for running Gemini CLI processes (session_id -> process)
+running_processes: dict[str, asyncio.subprocess.Process] = {}
 
 # Base directory for isolated sessions
 
@@ -229,6 +233,22 @@ async def chat_endpoint(request: ChatRequest):
         if not current_model:
             current_model = cfg.get("gemini_model", "auto")
 
+        # Handle stop command
+        if request.message.strip() == "!stop":
+            append_to_history(session_path, "user", request.message)
+            process = running_processes.get(safe_session_id)
+            if process:
+                try:
+                    # Kill the whole process group to ensure sub-commands are stopped
+                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                    reply = "Gemini CLI process stopped."
+                except Exception as e:
+                    reply = f"Failed to stop process: {e}"
+            else:
+                reply = "No active Gemini CLI process found for this session."
+            append_to_history(session_path, "bot", reply)
+            return ChatResponse(reply=reply)
+
         # Handle model switching command
         if request.message.startswith("!model"):
             append_to_history(session_path, "user", request.message)
@@ -384,18 +404,29 @@ async def chat_endpoint(request: ChatRequest):
             stderr=subprocess.PIPE,
             cwd=session_path,  # Execute within the isolated directory
             env=env,
+            process_group=0,  # Create a new process group for easy cleanup
         )
 
-        stdout, stderr = await process.communicate()
+        running_processes[safe_session_id] = process
+        try:
+            stdout, stderr = await process.communicate()
+        finally:
+            if running_processes.get(safe_session_id) == process:
+                del running_processes[safe_session_id]
 
-        if process.returncode != 0:
+        retcode = process.returncode
+        if retcode is None or retcode == 0:
+            reply_text = stdout.decode().strip()
+        elif retcode < 0:
+            # Process was terminated by a signal (e.g., via !stop)
+            reply_text = f"Process terminated by signal {-retcode}."
+        else:
             error_msg = stderr.decode().strip()
             print(f"Gemini CLI Error: {error_msg}")
             raise HTTPException(
                 status_code=500, detail=f"Gemini CLI failed: {error_msg}"
             )
 
-        reply_text = stdout.decode().strip()
         # Append bot reply to history
         append_to_history(session_path, "bot", reply_text)
 

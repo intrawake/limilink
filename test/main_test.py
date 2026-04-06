@@ -1,34 +1,26 @@
 from __future__ import annotations
 import pytest
 from unittest.mock import patch, AsyncMock
-from typing import Any
 from fastapi.testclient import TestClient
 import os
 import shutil
-import main
 from main import app
 
 client = TestClient(app)
 
-# Use a separate directory for testing to avoid nuking the actual sessions
-SESSIONS_DIR_TEST = os.path.join(os.path.dirname(__file__), "..", "session_test")
 
+@pytest.fixture(autouse=True)
+def test_sessions_dir(tmp_path, monkeypatch):
+    """Fixture to provide a clean, temporary sessions directory for each test."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
 
-def setup_function():
-    if os.path.exists(SESSIONS_DIR_TEST):
-        shutil.rmtree(SESSIONS_DIR_TEST)
-    os.makedirs(SESSIONS_DIR_TEST, exist_ok=True)
+    # Patch get_sessions_dir in the main module using monkeypatch
+    monkeypatch.setattr(
+        "main.get_sessions_dir", lambda cfg, config_dir: str(sessions_dir)
+    )
 
-    # Patch SESSIONS_DIR in main module
-    def mocked_get_sessions_dir(cfg: dict[Any, Any], config_dir: str) -> str:
-        return SESSIONS_DIR_TEST
-
-    main.get_sessions_dir = mocked_get_sessions_dir  # type: ignore
-
-
-def teardown_function():
-    if os.path.exists(SESSIONS_DIR_TEST):
-        shutil.rmtree(SESSIONS_DIR_TEST)
+    return str(sessions_dir)
 
 
 def test_list_sessions_empty():
@@ -65,7 +57,7 @@ def test_delete_session():
 @pytest.mark.asyncio
 @patch.dict(os.environ, {"LIMILINK_CONFIG": "/tmp/nonexistent_limilink_config.sxpb"})
 @patch("main.asyncio.create_subprocess_exec")
-async def test_chat_endpoint_invokes_gemini(mock_exec):
+async def test_chat_endpoint_invokes_gemini(mock_exec, test_sessions_dir):
     # Setup mock subprocess
     mock_process = AsyncMock()
     mock_process.returncode = 0
@@ -82,7 +74,7 @@ async def test_chat_endpoint_invokes_gemini(mock_exec):
     assert response.json() == {"reply": "mocked response from gemini"}
 
     # Verify directory was created and marked as project root
-    session_path = os.path.join(SESSIONS_DIR_TEST, "test_chat_session")
+    session_path = os.path.join(test_sessions_dir, "test_chat_session")
     assert os.path.exists(session_path)
     assert os.path.exists(os.path.join(session_path, ".project_root"))
 
@@ -100,7 +92,7 @@ async def test_chat_endpoint_invokes_gemini(mock_exec):
     assert mock_exec.call_args[1]["cwd"] == session_path
 
 
-def test_create_session_initialization():
+def test_create_session_initialization(test_sessions_dir):
     # Use the preset config for testing
     preset_config_path = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "preset", "config.sxpb")
@@ -110,7 +102,7 @@ def test_create_session_initialization():
         response = client.post(f"/sessions/{session_id}")
         assert response.status_code == 200
 
-        session_path = os.path.join(SESSIONS_DIR_TEST, session_id)
+        session_path = os.path.join(test_sessions_dir, session_id)
         assert os.path.exists(session_path)
         assert os.path.exists(os.path.join(session_path, ".initialized"))
         assert os.path.exists(os.path.join(session_path, ".project_root"))
@@ -239,9 +231,9 @@ async def test_resume_flag_injection(mock_exec):
 
 
 @pytest.mark.asyncio
-async def test_project_root_creation_on_chat():
+async def test_project_root_creation_on_chat(test_sessions_dir):
     session_id = "test_project_root_session"
-    session_path = os.path.join(SESSIONS_DIR_TEST, session_id)
+    session_path = os.path.join(test_sessions_dir, session_id)
 
     # Ensure directory does not exist
     if os.path.exists(session_path):
