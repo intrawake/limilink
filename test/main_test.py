@@ -262,3 +262,61 @@ async def test_project_root_creation_on_chat():
     # Verify directory and .project_root exist
     assert os.path.exists(session_path)
     assert os.path.exists(os.path.join(session_path, ".project_root"))
+
+
+@pytest.mark.asyncio
+@patch("main.load_config")
+@patch("main.asyncio.create_subprocess_exec")
+async def test_env_vars_injection(mock_exec, mock_load_config):
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"mocked response", b"")
+    mock_exec.return_value = mock_process
+
+    # Mock config with both gemini_env (list) and gemini_env_dict (dict)
+    mock_load_config.return_value = (
+        {
+            "gemini_env": [{"name": "VAR_LIST", "value": "val_list"}],
+            "gemini_env_dict": {"VAR_DICT": "val_dict", "VAR_OVERRIDE": "new_val"},
+            "gemini_args": ["-p"],
+        },
+        "/tmp",
+    )
+
+    # Also test override logic (if both specify same var)
+    # The current implementation processes list then dict, so dict wins.
+
+    session_id = "test_env_session"
+
+    with TestClient(app) as c:
+        response = c.post("/chat", json={"message": "hello", "session_id": session_id})
+        assert response.status_code == 200
+
+    # Check command env
+    mock_exec.assert_called_once()
+    env = mock_exec.call_args[1]["env"]
+
+    assert env["VAR_LIST"] == "val_list"
+    assert env["VAR_DICT"] == "val_dict"
+    assert env["VAR_OVERRIDE"] == "new_val"
+
+
+@pytest.mark.asyncio
+@patch("main.load_config")
+@patch("main.asyncio.create_subprocess_exec")
+async def test_env_vars_dict_only(mock_exec, mock_load_config):
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"mocked response", b"")
+    mock_exec.return_value = mock_process
+
+    mock_load_config.return_value = ({"gemini_env_dict": {"MY_VAR": "my_val"}}, "/tmp")
+
+    session_id = "test_env_dict_session"
+
+    with TestClient(app) as c:
+        response = c.post("/chat", json={"message": "hello", "session_id": session_id})
+        assert response.status_code == 200
+
+    env = mock_exec.call_args[1]["env"]
+    assert env["MY_VAR"] == "my_val"

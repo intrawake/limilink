@@ -264,22 +264,33 @@ async def chat_endpoint(request: ChatRequest):
                     break
             args = new_args
         else:
-            args = ["--model", current_model] + args
+            args += ["--model", current_model]
 
         # Inject --resume latest if not already present
         if "--resume" not in args:
-            args = ["--resume", "latest"] + args
+            args += ["--resume", "latest"]
 
-        cmd = [exepath] + args + [request.message]
+        cmd = [exepath] + args + ["-p", request.message]
 
         env = os.environ.copy()
 
-        # Add configured environment variables
+        # Add configured environment variables (list format)
         cfg_env = cfg.get("gemini_env", [])
         if isinstance(cfg_env, list):
             for env_var in cfg_env:
-                if "name" in env_var and "value" in env_var:
+                if (
+                    isinstance(env_var, dict)
+                    and "name" in env_var
+                    and "value" in env_var
+                ):
                     env[env_var["name"]] = env_var["value"]
+
+        # Add configured environment variables (dict format)
+        cfg_env_dict = cfg.get("gemini_env_dict", {})
+        if isinstance(cfg_env_dict, dict):
+            for name, value in cfg_env_dict.items():
+                if isinstance(value, str):
+                    env[name] = value
 
         # Inject system.md path if configured
         system_md_rel = cfg.get("gemini_system_md")

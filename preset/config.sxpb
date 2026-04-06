@@ -2,7 +2,6 @@
 (gemini_model gemini-2.5-flash-lite)
 (gemini_args (())
  --approval-mode plan
- -p
 )
 (gemini_system_md gemini_cli/SYSTEM.md)
 (gemini_workspace_md gemini_cli/GEMINI.md)
