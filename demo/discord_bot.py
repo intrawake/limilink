@@ -1,4 +1,5 @@
 import discord
+from discord.ext import tasks
 import os
 import httpx
 import json
@@ -73,11 +74,71 @@ def save_sessions():
     os.rename(temp_name, SESSION_TRACKER_FILE)
 
 
+async def send_limilink_reply(channel, reply_text, session_id):
+    session_path = os.path.join(sessions_dir, session_id)
+    outbox_dir = os.path.join(session_path, "outbox")
+    files = []
+    file_paths = []
+    if os.path.isdir(outbox_dir):
+        for filename in sorted(os.listdir(outbox_dir)):
+            file_path = os.path.join(outbox_dir, filename)
+            if os.path.isfile(file_path):
+                if os.path.getsize(file_path) < 25 * 1024 * 1024:
+                    files.append(discord.File(file_path))
+                    file_paths.append(file_path)
+                else:
+                    await channel.send(f"⚠️ File too large: `{filename}`")
+
+    if len(reply_text) > 2000:
+        chunks = [reply_text[i : i + 2000] for i in range(0, len(reply_text), 2000)]
+        for i, chunk in enumerate(chunks):
+            if i == len(chunks) - 1:
+                await channel.send(chunk, files=files[:10])
+            else:
+                await channel.send(chunk)
+    else:
+        if not reply_text and files:
+            await channel.send(files=files[:10])
+        elif reply_text:
+            await channel.send(reply_text, files=files[:10])
+
+    for i in range(10, len(files), 10):
+        await channel.send(files=files[i : i + 10])
+
+    for f in files:
+        f.close()
+    for p in file_paths:
+        try:
+            os.remove(p)
+        except Exception:
+            pass
+
+
+@tasks.loop(seconds=10.0)
+async def poll_notifyme():
+    for channel_id_str, session_id in list(channel_sessions.items()):
+        try:
+            async with httpx.AsyncClient() as http_client:
+                poll_url = f"http://localhost:{port}/sessions/{session_id}/poll"
+                response = await http_client.get(poll_url)
+                if response.status_code == 200:
+                    data = response.json()
+                    messages = data.get("messages", [])
+                    for msg in messages:
+                        channel = client.get_channel(int(channel_id_str))
+                        if channel:
+                            await send_limilink_reply(channel, msg, session_id)
+        except Exception:
+            pass
+
+
 @client.event
 async def on_ready():
     print(
         f"Limilink Discord Bot logged in as {client.user} connected to proxy on port {port}"
     )
+    if not poll_notifyme.is_running():
+        poll_notifyme.start()
 
 
 @client.event
@@ -113,50 +174,7 @@ async def on_message(message):
 
                 data = response.json()
                 reply_text = data.get("reply", "No reply received from Limilink.")
-
-                # Check for files in the session outbox
-                session_path = os.path.join(sessions_dir, session_id)
-                outbox_dir = os.path.join(session_path, "outbox")
-                files = []
-                file_paths = []
-                if os.path.isdir(outbox_dir):
-                    for filename in sorted(os.listdir(outbox_dir)):
-                        file_path = os.path.join(outbox_dir, filename)
-                        if os.path.isfile(file_path):
-                            # Discord file size limit is typically 25MB for free users
-                            if os.path.getsize(file_path) < 25 * 1024 * 1024:
-                                files.append(discord.File(file_path))
-                                file_paths.append(file_path)
-                            else:
-                                await message.channel.send(
-                                    f"⚠️ File too large: `{filename}`"
-                                )
-
-                if len(reply_text) > 2000:
-                    chunks = [
-                        reply_text[i : i + 2000]
-                        for i in range(0, len(reply_text), 2000)
-                    ]
-                    for i, chunk in enumerate(chunks):
-                        if i == len(chunks) - 1:
-                            await message.channel.send(chunk, files=files[:10])
-                        else:
-                            await message.channel.send(chunk)
-                else:
-                    await message.channel.send(reply_text, files=files[:10])
-
-                # Send remaining files if more than 10
-                for i in range(10, len(files), 10):
-                    await message.channel.send(files=files[i : i + 10])
-
-                # Clean up
-                for f in files:
-                    f.close()
-                for p in file_paths:
-                    try:
-                        os.remove(p)
-                    except Exception:
-                        pass
+                await send_limilink_reply(message.channel, reply_text, session_id)
         except Exception as e:
             await message.channel.send(
                 f"Error communicating with Limilink on port {port}: {e}"

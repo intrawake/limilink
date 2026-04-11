@@ -28,6 +28,14 @@ class ChatResponse(BaseModel):
     reply: str
 
 
+class NotifymeRequest(BaseModel):
+    message: str
+
+
+class PollResponse(BaseModel):
+    messages: list[str]
+
+
 class SessionListResponse(BaseModel):
     sessions: list[str]
 
@@ -66,6 +74,34 @@ def get_sessions_dir(cfg: dict[Any, Any], config_dir: str) -> str:
         return session_dirpath
     # Default to "session" in the project root (assumed to be parent of src)
     return os.path.join(os.path.dirname(__file__), "..", "session")
+
+
+def enqueue_unread_message(session_path: str, message: str):
+    unread_path = os.path.join(session_path, "unread.json")
+    try:
+        if os.path.exists(unread_path):
+            with open(unread_path, "r") as f:
+                messages = json.load(f)
+        else:
+            messages = []
+    except Exception:
+        messages = []
+    messages.append(message)
+    with open(unread_path, "w") as f:
+        json.dump(messages, f)
+
+
+def dequeue_unread_messages(session_path: str) -> list[str]:
+    unread_path = os.path.join(session_path, "unread.json")
+    try:
+        if os.path.exists(unread_path):
+            with open(unread_path, "r") as f:
+                messages = json.load(f)
+            os.remove(unread_path)
+            return messages
+    except Exception:
+        pass
+    return []
 
 
 def ensure_session_initialized(session_path: str, cfg: dict[Any, Any], config_dir: str):
@@ -107,6 +143,7 @@ def ensure_session_initialized(session_path: str, cfg: dict[Any, Any], config_di
             link_path = os.path.join(session_path, basename)
             if not os.path.exists(link_path) and not os.path.islink(link_path):
                 try:
+                    os.makedirs(os.path.dirname(link_path), exist_ok=True)
                     os.symlink(target_abs, link_path)
                 except Exception as e:
                     print(f"Failed to create symlink {link_path} -> {target_abs}: {e}")
@@ -206,11 +243,10 @@ async def get_session_history(session_id: str):
     return {"history": load_session_history(session_path)}
 
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest):
+async def process_chat(session_id: str, message: str) -> str:
     try:
         # Secure the session_id to prevent directory traversal
-        safe_session_id = sanitize_session_id(request.session_id)
+        safe_session_id = sanitize_session_id(session_id)
 
         cfg, config_dir = load_config()
         sessions_dir = get_sessions_dir(cfg, config_dir)
@@ -234,8 +270,8 @@ async def chat_endpoint(request: ChatRequest):
             current_model = cfg.get("gemini_model", "auto")
 
         # Handle stop command
-        if request.message.strip() == "!stop":
-            append_to_history(session_path, "user", request.message)
+        if message.strip() == "!stop":
+            append_to_history(session_path, "user", message)
             process = running_processes.get(safe_session_id)
             if process:
                 try:
@@ -247,27 +283,27 @@ async def chat_endpoint(request: ChatRequest):
             else:
                 reply = "No active Gemini CLI process found for this session."
             append_to_history(session_path, "bot", reply)
-            return ChatResponse(reply=reply)
+            return reply
 
         # Handle model switching command
-        if request.message.startswith("!model"):
-            append_to_history(session_path, "user", request.message)
-            parts = request.message.split(maxsplit=1)
+        if message.startswith("!model"):
+            append_to_history(session_path, "user", message)
+            parts = message.split(maxsplit=1)
             if len(parts) == 1:
                 reply = f"Current model: {current_model}"
                 append_to_history(session_path, "bot", reply)
-                return ChatResponse(reply=reply)
+                return reply
             new_model = parts[1].strip()
             with open(model_path, "w") as f:
                 f.write(new_model)
             reply = f"Model switched to: {new_model}"
             append_to_history(session_path, "bot", reply)
-            return ChatResponse(reply=reply)
+            return reply
 
         # Handle env command
-        if request.message.startswith("!env"):
-            append_to_history(session_path, "user", request.message)
-            parts = request.message.split(maxsplit=2)
+        if message.startswith("!env"):
+            append_to_history(session_path, "user", message)
+            parts = message.split(maxsplit=2)
 
             env_overrides_path = os.path.join(session_path, ".env_overrides.json")
             env_overrides = {}
@@ -281,7 +317,7 @@ async def chat_endpoint(request: ChatRequest):
             if len(parts) == 1:
                 reply = "Usage: !env <VAR_NAME> [VALUE]"
                 append_to_history(session_path, "bot", reply)
-                return ChatResponse(reply=reply)
+                return reply
 
             var_name = parts[1]
             if len(parts) == 2:
@@ -310,7 +346,7 @@ async def chat_endpoint(request: ChatRequest):
                 else:
                     reply = f"{var_name}={current_val}"
                 append_to_history(session_path, "bot", reply)
-                return ChatResponse(reply=reply)
+                return reply
 
             var_value = parts[2]
             env_overrides[var_name] = var_value
@@ -318,7 +354,7 @@ async def chat_endpoint(request: ChatRequest):
                 json.dump(env_overrides, f)
             reply = f"Environment variable {var_name} set to: {var_value}"
             append_to_history(session_path, "bot", reply)
-            return ChatResponse(reply=reply)
+            return reply
 
         args = cfg.get(
             "gemini_args",
@@ -346,7 +382,7 @@ async def chat_endpoint(request: ChatRequest):
         if "--resume" not in args:
             args += ["--resume", "latest"]
 
-        cmd = [exepath] + args + ["-p", request.message]
+        cmd = [exepath] + args + ["-p", message]
 
         env = os.environ.copy()
 
@@ -396,7 +432,7 @@ async def chat_endpoint(request: ChatRequest):
                 pass
 
         # Append user message to history
-        append_to_history(session_path, "user", request.message)
+        append_to_history(session_path, "user", message)
 
         process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -430,13 +466,58 @@ async def chat_endpoint(request: ChatRequest):
         # Append bot reply to history
         append_to_history(session_path, "bot", reply_text)
 
-        return {"reply": reply_text}
+        return reply_text
 
     except Exception as e:
         import traceback
 
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat_endpoint(request: ChatRequest):
+    try:
+        reply_text = await process_chat(request.session_id, request.message)
+        return {"reply": reply_text}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def run_notifyme_task(session_id: str, message: str):
+    try:
+        reply_text = await process_chat(session_id, message)
+        cfg, config_dir = load_config()
+        sessions_dir = get_sessions_dir(cfg, config_dir)
+        session_path = os.path.join(sessions_dir, sanitize_session_id(session_id))
+        enqueue_unread_message(session_path, reply_text)
+    except Exception as e:
+        print(f"Notifyme task failed for {session_id}: {e}")
+
+
+@app.post("/sessions/{session_id}/notifyme")
+async def notifyme_session(session_id: str, request: NotifymeRequest):
+    safe_session_id = sanitize_session_id(session_id)
+    # Start the chat asynchronously
+    asyncio.create_task(run_notifyme_task(safe_session_id, request.message))
+    return {"status": "notifyme_initiated"}
+
+
+@app.get("/sessions/{session_id}/poll", response_model=PollResponse)
+async def poll_session(session_id: str):
+    safe_session_id = sanitize_session_id(session_id)
+    cfg, config_dir = load_config()
+    sessions_dir = get_sessions_dir(cfg, config_dir)
+    session_path = os.path.join(sessions_dir, safe_session_id)
+    if not os.path.exists(session_path):
+        return {"messages": []}
+    messages = dequeue_unread_messages(session_path)
+    return {"messages": messages}
 
 
 # Mount a simple static directory if needed later for the UI

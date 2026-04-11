@@ -4,7 +4,13 @@ import sys
 import os
 import atexit
 import signal
+import logging
 from main import load_config, get_sessions_dir
+
+
+class EndpointFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "/poll" not in record.getMessage()
 
 
 def main():
@@ -65,6 +71,7 @@ def main():
         lifespan="off",
     )
     server = uvicorn.Server(config)
+    logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
 
     try:
         server.run()
