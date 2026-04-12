@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import re
 import shutil
 import subprocess
 import asyncio
@@ -453,6 +454,7 @@ async def process_chat(session_id: str, message: str) -> str:
         retcode = process.returncode
         if retcode is None or retcode == 0:
             reply_text = stdout.decode().strip()
+            reply_text = re.sub(r".*\n\[Thought: true\]", "", reply_text)
         elif retcode < 0:
             # Process was terminated by a signal (e.g., via !stop)
             reply_text = f"Process terminated by signal {-retcode}."
