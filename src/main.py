@@ -386,6 +386,7 @@ async def process_chat(session_id: str, message: str) -> str:
         cmd = [exepath] + args + ["-p", message]
 
         env = os.environ.copy()
+        env["LIMILINK_SESSION"] = safe_session_id
 
         # Add configured environment variables (list format)
         cfg_env = cfg.get("gemini_env", [])
@@ -461,6 +462,21 @@ async def process_chat(session_id: str, message: str) -> str:
         else:
             error_msg = stderr.decode().strip()
             print(f"Gemini CLI Error: {error_msg}")
+            # Propagate common status codes (mapped to retcode % 256)
+            # 173 = 429 % 256
+            if retcode == 173 or "429" in error_msg or "Rate limit" in error_msg:
+                raise HTTPException(
+                    status_code=429, detail=f"Rate limit exceeded: {error_msg}"
+                )
+            # 145 = 401 % 256, 147 = 403 % 256
+            if retcode in (145, 147) or "auth" in error_msg.lower():
+                sc = 401
+                if retcode == 147:
+                    sc = 403
+                raise HTTPException(
+                    status_code=sc,
+                    detail=f"Authentication error: {error_msg}",
+                )
             raise HTTPException(
                 status_code=500, detail=f"Gemini CLI failed: {error_msg}"
             )
@@ -470,6 +486,8 @@ async def process_chat(session_id: str, message: str) -> str:
 
         return reply_text
 
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
 
@@ -500,6 +518,16 @@ async def run_notifyme_task(session_id: str, message: str):
         enqueue_unread_message(session_path, reply_text)
     except Exception as e:
         print(f"Notifyme task failed for {session_id}: {e}")
+        try:
+            cfg, config_dir = load_config()
+            sessions_dir = get_sessions_dir(cfg, config_dir)
+            session_path = os.path.join(sessions_dir, sanitize_session_id(session_id))
+            error_msg = str(e)
+            if isinstance(e, HTTPException):
+                error_msg = f"Error {e.status_code}: {e.detail}"
+            enqueue_unread_message(session_path, f"❌ Chat failed: {error_msg}")
+        except Exception:
+            pass
 
 
 @app.post("/sessions/{session_id}/notifyme")

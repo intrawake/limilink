@@ -20,7 +20,7 @@ def test_find_session_id_logical_pwd():
     logical_pwd = "/fake/logical/workspace/session_123/bin"
 
     with (
-        patch.dict(os.environ, {"PWD": logical_pwd}),
+        patch.dict(os.environ, {"PWD": logical_pwd}, clear=True),
         patch("os.path.exists") as mock_exists,
         patch("os.getcwd", return_value="/tmp/physical/path"),
     ):

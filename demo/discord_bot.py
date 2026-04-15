@@ -175,6 +175,15 @@ async def on_message(message):
                 data = response.json()
                 reply_text = data.get("reply", "No reply received from Limilink.")
                 await send_limilink_reply(message.channel, reply_text, session_id)
+        except httpx.HTTPStatusError as e:
+            error_detail = "Unknown error"
+            try:
+                error_detail = e.response.json().get("detail", str(e))
+            except Exception:
+                error_detail = str(e)
+            await message.channel.send(
+                f"⚠️ **Error {e.response.status_code}**: {error_detail}"
+            )
         except Exception as e:
             await message.channel.send(
                 f"Error communicating with Limilink on port {port}: {e}"

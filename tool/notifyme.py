@@ -32,6 +32,11 @@ def load_config():
 
 
 def find_session_id():
+    # Priority 1: Environment variable
+    env_sid = os.environ.get("LIMILINK_SESSION")
+    if env_sid:
+        return env_sid
+
     def check_dir(d):
         d = os.path.abspath(d)
         while True:
