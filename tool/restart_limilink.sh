@@ -72,9 +72,9 @@ RESTART_CMD=$(cat <<INNEREOF
   # Restart
   cd $(cd "$(dirname "$0")/.." && pwd)
   mkdir -p session
-  setsid pdm run server > session/server.log 2>&1 &
+  setsid pdm run limilink > session/server.log 2>&1 &
   echo \$! > session/server.pid
-  setsid pdm run discord_bot > session/discord_bot.log 2>&1 &
+  setsid pdm run limilink-discord > session/discord_bot.log 2>&1 &
   echo \$! > session/bot.pid
 INNEREOF
 )

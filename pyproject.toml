@@ -32,9 +32,9 @@ pythonpath = ["src", "."]
 testpaths = ["test"]
 
 [tool.pdm.scripts]
-server = { shell = "PYTHONPATH=src python src/server.py" }
+limilink = { shell = "PYTHONPATH=src python src/server.py" }
 preset_server = { shell = "PYTHONPATH=src python src/server.py --config preset/config.sxpb" }
-discord_bot = { shell = "PYTHONPATH=src python demo/discord_bot.py" }
+limilink-discord = { shell = "PYTHONPATH=src python demo/discord_bot.py" }
 preset_discord_bot = { shell = "LIMILINK_CONFIG=preset/config.sxpb PYTHONPATH=src python demo/discord_bot.py" }
 test = "pytest -q"
 check-format = "ruff check"

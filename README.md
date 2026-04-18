@@ -6,7 +6,7 @@ A mobile-friendly web chat proxy to bridge the dreamscape persona via `gemini-cl
 Run the server:
 ```sh
 pdm install
-pdm run server
+pdm run limilink
 ```
 
 To run the discord bot:
@@ -14,5 +14,5 @@ To run the discord bot:
 ```sh
 pdm lock --group discord
 pdm install -G discord
-pdm run discord_bot
+pdm run limilink-discord
 ```
