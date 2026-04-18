@@ -104,6 +104,64 @@ class TestDiscordBot(unittest.TestCase):
             # Verify file was cleaned up
             self.assertFalse(os.path.exists(test_file))
 
+    @patch("httpx.AsyncClient")
+    @patch("discord.File")
+    def test_error_propagation(self, mock_file_class, mock_async_client_class):
+        # Setup a mock session
+        session_id = "test_session_error"
+
+        # Mock discord objects
+        mock_message = MagicMock()
+        mock_message.author = MagicMock()
+        mock_message.author.id = 456
+        mock_user = MagicMock()
+        mock_user.id = 789
+        type(bot.client).user = mock_user
+
+        mock_message.channel.id = 123
+        mock_message.channel.name = "limilink-test"
+        mock_message.content = "hello error"
+        mock_message.channel.send = AsyncMock()
+
+        mock_typing = MagicMock()
+        mock_typing.__aenter__ = AsyncMock()
+        mock_typing.__aexit__ = AsyncMock()
+        mock_message.channel.typing.return_value = mock_typing
+
+        bot.channel_sessions = {"123": session_id}
+
+        # Mock the HTTP response to raise HTTPStatusError
+        mock_client_instance = mock_async_client_class.return_value
+        mock_client_instance.__aenter__.return_value = mock_client_instance
+
+        import httpx
+
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.json.return_value = {"detail": "Gemini CLI failed: some error"}
+
+        mock_error = httpx.HTTPStatusError(
+            message="Server Error", request=MagicMock(), response=mock_response
+        )
+        mock_response.raise_for_status = MagicMock(side_effect=mock_error)
+        mock_client_instance.post = AsyncMock(return_value=mock_response)
+
+        async def run_test():
+            await bot.on_message(mock_message)
+
+            # Verify the error message was sent
+            mock_message.channel.send.assert_called()
+
+            found_error_msg = False
+            for call in mock_message.channel.send.call_args_list:
+                args, kwargs = call
+                if (
+                    len(args) > 0
+                    and "⚠️ **Error 500**: Gemini CLI failed: some error" in args[0]
+                ):
+                    found_error_msg = True
+            self.assertTrue(found_error_msg)
+
         asyncio.run(run_test())
 
 

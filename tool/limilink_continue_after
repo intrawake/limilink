@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+import sys
+import os
+import time
+import argparse
+import subprocess
+
+def notify(message):
+    """Notify the current Limilink session."""
+    tool_dir = os.path.dirname(os.path.abspath(__file__))
+    notifyme_path = os.path.join(tool_dir, "notifyme.py")
+    if os.path.exists(notifyme_path):
+        subprocess.run([sys.executable, notifyme_path, message])
+    else:
+        # Fallback to PATH
+        subprocess.run(["notifyme", message])
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Run a command and notify upon completion. Backgrounds itself after a delay if the command is still running.",
+        add_help=False
+    )
+    # Define flags manually to allow for positional command at the end
+    parser.add_argument("--stdin", help="File to read stdin from. Defaults to /dev/null.")
+    parser.add_argument("--stdout", help="File to write stdout to. Defaults to /dev/null.")
+    parser.add_argument("--stderr", help="File to write stderr to. Defaults to stdout target.")
+    parser.add_argument("--delay", type=float, default=5.0, help="Time to wait before backgrounding (seconds). Default: 5.0.")
+    parser.add_argument("--help", action="help", help="Show this help message and exit.")
+    
+    # We use parse_known_args to separate our flags from the command
+    args, command = parser.parse_known_args()
+
+    if command and command[0] == "--":
+        command = command[1:]
+
+    if not command:
+        print("Error: No command specified.", file=sys.stderr)
+        parser.print_help()
+        sys.exit(1)
+
+    command_str = " ".join(command)
+
+    try:
+        # We fork so that the monitor process (child) can stay alive after 
+        # the parent exits (backgrounding).
+        c_pid = os.fork()
+    except OSError as e:
+        print(f"fork failed: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if c_pid == 0:
+        # Child: The Monitor
+        try:
+            stdin_fd = open(args.stdin, 'r') if args.stdin else open(os.devnull, 'r')
+            stdout_fd = open(args.stdout, 'a') if args.stdout else open(os.devnull, 'a')
+            if args.stderr:
+                stderr_fd = open(args.stderr, 'a')
+            else:
+                stderr_fd = stdout_fd
+        except Exception as e:
+            print(f"Failed to open IO files: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        # Start the subprocess. 
+        # We don't use start_new_session=True here so it can be Ctrl+C'd 
+        # during the initial delay if desired.
+        proc = subprocess.Popen(
+            command,
+            stdin=stdin_fd,
+            stdout=stdout_fd,
+            stderr=stderr_fd
+        )
+        
+        # Close inherited FDs in the monitor process
+        stdin_fd.close()
+        if stdout_fd != stderr_fd:
+            stdout_fd.close()
+        stderr_fd.close()
+
+        # Wait for the process
+        proc.wait()
+        ret = proc.returncode
+        status = "✅ Case Closed" if ret == 0 else f"❌ Case Dismissed (Exit {ret})"
+        notify(f"[{status}] limilink_continue_after {command_str}")
+        sys.exit(ret)
+    else:
+        # Parent: The Waiter
+        start_time = time.time()
+        while time.time() - start_time < args.delay:
+            # Check if child (monitor) has exited
+            pid, status = os.waitpid(c_pid, os.WNOHANG)
+            if pid != 0:
+                # Child (and thus the command) finished within the delay
+                if os.WIFEXITED(status):
+                    sys.exit(os.WEXITSTATUS(status))
+                else:
+                    sys.exit(1)
+            time.sleep(0.1)
+        
+        # Delay passed, child is still running the command.
+        # We exit, leaving the child (monitor) to finish in the background.
+        print(f"Command still running after {args.delay}s. Backgrounding limilink_continue_after...")
+        sys.exit(0)
+
+if __name__ == "__main__":
+    main()

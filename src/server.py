@@ -77,10 +77,8 @@ def main():
         server.run()
     except (KeyboardInterrupt, SystemExit):
         pass
-    except Exception:
-        import traceback
-
-        traceback.print_exc()
+    except Exception as e:
+        print(f"Server error: {e}")
         sys.exit(1)
 
     sys.exit(0)

@@ -181,13 +181,16 @@ async def on_message(message):
                 error_detail = e.response.json().get("detail", str(e))
             except Exception:
                 error_detail = str(e)
-            await message.channel.send(
-                f"⚠️ **Error {e.response.status_code}**: {error_detail}"
-            )
+
+            error_msg = f"⚠️ **Error {e.response.status_code}**: {error_detail}"
+            if len(error_msg) > 2000:
+                error_msg = error_msg[:1996] + "..."
+            await message.channel.send(error_msg)
         except Exception as e:
-            await message.channel.send(
-                f"Error communicating with Limilink on port {port}: {e}"
-            )
+            error_msg = f"Error communicating with Limilink on port {port}: {e}"
+            if len(error_msg) > 2000:
+                error_msg = error_msg[:1996] + "..."
+            await message.channel.send(error_msg)
 
 
 if __name__ == "__main__":

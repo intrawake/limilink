@@ -4,6 +4,12 @@ from unittest.mock import patch, AsyncMock
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def test_sessions_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("SESSIONS_DIR", str(tmp_path))
+    yield
+
+
 @pytest.mark.asyncio
 @patch("main.asyncio.create_subprocess_exec")
 async def test_thought_strip(mock_exec):

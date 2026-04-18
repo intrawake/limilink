@@ -461,10 +461,17 @@ async def process_chat(session_id: str, message: str) -> str:
             reply_text = f"Process terminated by signal {-retcode}."
         else:
             error_msg = stderr.decode().strip()
+            if "\n    at " in error_msg:
+                error_msg = error_msg.split("\n    at ")[0].strip()
             print(f"Gemini CLI Error: {error_msg}")
             # Propagate common status codes (mapped to retcode % 256)
             # 173 = 429 % 256
-            if retcode == 173 or "429" in error_msg or "Rate limit" in error_msg:
+            if (
+                retcode == 173
+                or "429" in error_msg
+                or "Rate limit" in error_msg
+                or "TOO_MANY_REQUESTS" in error_msg
+            ):
                 raise HTTPException(
                     status_code=429, detail=f"Rate limit exceeded: {error_msg}"
                 )
@@ -489,9 +496,7 @@ async def process_chat(session_id: str, message: str) -> str:
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
-
-        traceback.print_exc()
+        print(f"Internal error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -503,9 +508,7 @@ async def chat_endpoint(request: ChatRequest):
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
-
-        traceback.print_exc()
+        print(f"Internal error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

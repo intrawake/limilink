@@ -37,7 +37,7 @@ async def test_429_propagation_from_retcode(mock_exec):
 async def test_429_propagation_from_stderr(mock_exec):
     mock_process = AsyncMock()
     mock_process.returncode = 1
-    mock_process.communicate.return_value = (b"", b"Error 429: Too Many Requests")
+    mock_process.communicate.return_value = (b"", b"TOO_MANY_REQUESTS")
     mock_exec.return_value = mock_process
 
     with TestClient(app) as c:
@@ -46,7 +46,7 @@ async def test_429_propagation_from_stderr(mock_exec):
         )
 
     assert response.status_code == 429
-    assert "Too Many Requests" in response.json()["detail"]
+    assert "TOO_MANY_REQUESTS" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -77,3 +77,18 @@ async def test_403_propagation_from_retcode(mock_exec):
 
     assert response.status_code == 403
     assert "Authentication error" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+@patch("main.asyncio.create_subprocess_exec")
+async def test_500_propagation_from_unknown_error(mock_exec):
+    mock_process = AsyncMock()
+    mock_process.returncode = 1
+    mock_process.communicate.return_value = (b"", b"Some strange error")
+    mock_exec.return_value = mock_process
+
+    with TestClient(app) as c:
+        response = c.post("/chat", json={"message": "hello", "session_id": "test_500"})
+
+    assert response.status_code == 500
+    assert "Some strange error" in response.json()["detail"]
