@@ -8,11 +8,22 @@ import tempfile
 import atexit
 import signal
 import sys
+import logging
 from main import load_config, get_sessions_dir
+import otel_setup
 
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
 
 cfg, config_dir = load_config()
+
+otel_setup.init_otel("limilink-discord", cfg)
+if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+    try:
+        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor  # type: ignore
+
+        HTTPXClientInstrumentor().instrument()
+    except ImportError:
+        pass
 
 port = 8000
 if cfg:
@@ -195,7 +206,7 @@ async def on_message(message):
 
 if __name__ == "__main__":
     if TOKEN is None:
-        print(
+        logging.error(
             "Error: DISCORD_BOT_TOKEN environment variable or discord_bot_token in config.sxpb not set."
         )
         sys.exit(1)

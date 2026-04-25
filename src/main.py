@@ -6,6 +6,7 @@ import subprocess
 import asyncio
 import json
 import signal
+import logging
 from typing import Any
 import sxpb
 from fastapi import FastAPI, HTTPException
@@ -496,7 +497,7 @@ async def process_chat(session_id: str, message: str) -> str:
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Internal error: {e}")
+        logging.error(f"Internal error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -508,7 +509,7 @@ async def chat_endpoint(request: ChatRequest):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Internal error: {e}")
+        logging.error(f"Internal error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -520,7 +521,7 @@ async def run_notifyme_task(session_id: str, message: str):
         session_path = os.path.join(sessions_dir, sanitize_session_id(session_id))
         enqueue_unread_message(session_path, reply_text)
     except Exception as e:
-        print(f"Notifyme task failed for {session_id}: {e}")
+        logging.error(f"Notifyme task failed for {session_id}: {e}")
         try:
             cfg, config_dir = load_config()
             sessions_dir = get_sessions_dir(cfg, config_dir)

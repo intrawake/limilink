@@ -6,6 +6,8 @@ import atexit
 import signal
 import logging
 from main import load_config, get_sessions_dir
+import otel_setup
+from main import app
 
 
 class EndpointFilter(logging.Filter):
@@ -32,6 +34,15 @@ def main():
     os.environ["LIMILINK_CONFIG"] = args.config
 
     cfg, config_dir = load_config()
+
+    otel_setup.init_otel("limilink-server", cfg)
+    if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+        try:
+            from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor  # type: ignore
+
+            FastAPIInstrumentor.instrument_app(app)
+        except ImportError:
+            print("OpenTelemetry FastAPI instrumentation not installed.")
 
     port = 8000
     if cfg:
@@ -69,6 +80,7 @@ def main():
         reload=False,
         log_level="info",
         lifespan="off",
+        log_config=None,
     )
     server = uvicorn.Server(config)
     logging.getLogger("uvicorn.access").addFilter(EndpointFilter())

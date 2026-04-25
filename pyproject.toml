@@ -17,6 +17,14 @@ dependencies = [
 
 [project.optional-dependencies]
 discord = ["discord-py>=2.3.2"]
+otel = [
+    "opentelemetry-api>=1.41.1",
+    "opentelemetry-sdk>=1.41.1",
+    "opentelemetry-exporter-otlp>=1.41.1",
+    "opentelemetry-instrumentation-fastapi>=0.62b1",
+    "opentelemetry-instrumentation-httpx>=0.62b1",
+    "opentelemetry-instrumentation-logging>=0.62b1",
+]
 
 [project.urls]
 Homepage = "https://github.com/intrawake/limilink"
