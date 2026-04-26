@@ -6,20 +6,6 @@ import httpx
 from main import app, running_processes
 
 
-@pytest.fixture(autouse=True)
-def test_sessions_dir(tmp_path, monkeypatch):
-    """Fixture to provide a clean, temporary sessions directory for each test."""
-    sessions_dir = tmp_path / "sessions"
-    sessions_dir.mkdir()
-
-    # Patch get_sessions_dir in the main module using monkeypatch
-    monkeypatch.setattr(
-        "main.get_sessions_dir", lambda cfg, config_dir: str(sessions_dir)
-    )
-
-    return str(sessions_dir)
-
-
 @pytest.mark.asyncio
 async def test_stop_command_logic():
     session_id = "test_stop_session"

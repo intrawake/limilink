@@ -6,17 +6,6 @@ from main import app
 client = TestClient(app)
 
 
-@pytest.fixture(autouse=True)
-def test_sessions_dir(tmp_path, monkeypatch):
-    """Fixture to provide a clean, temporary sessions directory for each test."""
-    sessions_dir = tmp_path / "sessions"
-    sessions_dir.mkdir()
-    monkeypatch.setattr(
-        "main.get_sessions_dir", lambda cfg, config_dir: str(sessions_dir)
-    )
-    return str(sessions_dir)
-
-
 @pytest.mark.asyncio
 @patch("main.asyncio.create_subprocess_exec")
 async def test_429_propagation_from_retcode(mock_exec):

@@ -9,20 +9,6 @@ from main import app
 client = TestClient(app)
 
 
-@pytest.fixture(autouse=True)
-def test_sessions_dir(tmp_path, monkeypatch):
-    """Fixture to provide a clean, temporary sessions directory for each test."""
-    sessions_dir = tmp_path / "sessions"
-    sessions_dir.mkdir()
-
-    # Patch get_sessions_dir in the main module using monkeypatch
-    monkeypatch.setattr(
-        "main.get_sessions_dir", lambda cfg, config_dir: str(sessions_dir)
-    )
-
-    return str(sessions_dir)
-
-
 def test_list_sessions_empty():
     response = client.get("/sessions")
     assert response.status_code == 200

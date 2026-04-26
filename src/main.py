@@ -66,6 +66,10 @@ def load_config() -> tuple[dict[Any, Any], str]:
 
 
 def get_sessions_dir(cfg: dict[Any, Any], config_dir: str) -> str:
+    env_sessions_dir = os.environ.get("LIMILINK_SESSIONS_DIR")
+    if env_sessions_dir:
+        return os.path.abspath(env_sessions_dir)
+
     session_dirpath = cfg.get("session_dirpath")
     if session_dirpath:
         session_dirpath = os.path.expanduser(session_dirpath)
