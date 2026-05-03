@@ -80,8 +80,8 @@ def main():
         # Wait for the process
         proc.wait()
         ret = proc.returncode
-        status = "✅ Case Closed" if ret == 0 else f"❌ Case Dismissed (Exit {ret})"
-        notify(f"[{status}] limilink_continue_after {command_str}")
+        status = "✅ Finished" if ret == 0 else f"❌ Failed (Exit {ret})"
+        notify(f"[{status}] Command completed: {command_str}")
         sys.exit(ret)
     else:
         # Parent: The Waiter

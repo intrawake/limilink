@@ -17,6 +17,14 @@ app = FastAPI()
 
 # Global tracker for running Gemini CLI processes (session_id -> process)
 running_processes: dict[str, asyncio.subprocess.Process] = {}
+session_locks: dict[str, asyncio.Lock] = {}
+
+
+def get_session_lock(session_id: str) -> asyncio.Lock:
+    if session_id not in session_locks:
+        session_locks[session_id] = asyncio.Lock()
+    return session_locks[session_id]
+
 
 # Base directory for isolated sessions
 
@@ -441,57 +449,59 @@ async def process_chat(session_id: str, message: str) -> str:
         # Append user message to history
         append_to_history(session_path, "user", message)
 
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=session_path,  # Execute within the isolated directory
-            env=env,
-            process_group=0,  # Create a new process group for easy cleanup
-        )
-
-        running_processes[safe_session_id] = process
-        try:
-            stdout, stderr = await process.communicate()
-        finally:
-            if running_processes.get(safe_session_id) == process:
-                del running_processes[safe_session_id]
-
-        retcode = process.returncode
-        if retcode is None or retcode == 0:
-            reply_text = stdout.decode().strip()
-            reply_text = re.sub(r".*\n\[Thought: true\]", "", reply_text)
-        elif retcode < 0:
-            # Process was terminated by a signal (e.g., via !stop)
-            reply_text = f"Process terminated by signal {-retcode}."
-        else:
-            error_msg = stderr.decode().strip()
-            if "\n    at " in error_msg:
-                error_msg = error_msg.split("\n    at ")[0].strip()
-            print(f"Gemini CLI Error: {error_msg}")
-            # Propagate common status codes (mapped to retcode % 256)
-            # 173 = 429 % 256
-            if (
-                retcode == 173
-                or "429" in error_msg
-                or "Rate limit" in error_msg
-                or "TOO_MANY_REQUESTS" in error_msg
-            ):
-                raise HTTPException(
-                    status_code=429, detail=f"Rate limit exceeded: {error_msg}"
-                )
-            # 145 = 401 % 256, 147 = 403 % 256
-            if retcode in (145, 147) or "auth" in error_msg.lower():
-                sc = 401
-                if retcode == 147:
-                    sc = 403
-                raise HTTPException(
-                    status_code=sc,
-                    detail=f"Authentication error: {error_msg}",
-                )
-            raise HTTPException(
-                status_code=500, detail=f"Gemini CLI failed: {error_msg}"
+        lock = get_session_lock(safe_session_id)
+        async with lock:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=session_path,  # Execute within the isolated directory
+                env=env,
+                process_group=0,  # Create a new process group for easy cleanup
             )
+
+            running_processes[safe_session_id] = process
+            try:
+                stdout, stderr = await process.communicate()
+            finally:
+                if running_processes.get(safe_session_id) == process:
+                    del running_processes[safe_session_id]
+
+            retcode = process.returncode
+            if retcode is None or retcode == 0:
+                reply_text = stdout.decode().strip()
+                reply_text = re.sub(r".*\n\[Thought: true\]", "", reply_text)
+            elif retcode < 0:
+                # Process was terminated by a signal (e.g., via !stop)
+                reply_text = f"Process terminated by signal {-retcode}."
+            else:
+                error_msg = stderr.decode().strip()
+                if "\n    at " in error_msg:
+                    error_msg = error_msg.split("\n    at ")[0].strip()
+                print(f"Gemini CLI Error: {error_msg}")
+                # Propagate common status codes (mapped to retcode % 256)
+                # 173 = 429 % 256
+                if (
+                    retcode == 173
+                    or "429" in error_msg
+                    or "Rate limit" in error_msg
+                    or "TOO_MANY_REQUESTS" in error_msg
+                ):
+                    raise HTTPException(
+                        status_code=429, detail=f"Rate limit exceeded: {error_msg}"
+                    )
+                # 145 = 401 % 256, 147 = 403 % 256
+                if retcode in (145, 147) or "auth" in error_msg.lower():
+                    sc = 401
+                    if retcode == 147:
+                        sc = 403
+                    raise HTTPException(
+                        status_code=sc,
+                        detail=f"Authentication error: {error_msg}",
+                    )
+                raise HTTPException(
+                    status_code=500, detail=f"Gemini CLI failed: {error_msg}"
+                )
 
         # Append bot reply to history
         append_to_history(session_path, "bot", reply_text)
