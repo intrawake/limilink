@@ -13,7 +13,7 @@ async def test_stop_command_logic():
     # Mock the process
     mock_process = AsyncMock()
     mock_process.pid = 12345
-    mock_process.returncode = -signal.SIGTERM
+    mock_process.returncode = -signal.SIGKILL
 
     # We want communicate to hang until we say so
     stop_event = asyncio.Event()
@@ -51,14 +51,14 @@ async def test_stop_command_logic():
             assert stop_response.json()["reply"] == "Gemini CLI process stopped."
 
             # Verify killpg was called with the right PGID
-            mock_killpg.assert_called_once_with(54321, signal.SIGTERM)
+            mock_killpg.assert_called_once_with(54321, signal.SIGKILL)
 
             # Now allow the first request to finish (simulating it being killed)
             stop_event.set()
 
             chat_response = await chat_task
             assert chat_response.status_code == 200
-            assert "terminated by signal 15" in chat_response.json()["reply"]
+            assert "terminated by signal 9" in chat_response.json()["reply"]
 
             # Verify it's removed from tracker
             assert session_id not in running_processes

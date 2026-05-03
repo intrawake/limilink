@@ -282,7 +282,7 @@ async def process_chat(session_id: str, message: str) -> str:
             if process:
                 try:
                     # Kill the whole process group to ensure sub-commands are stopped
-                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
                     reply = "Gemini CLI process stopped."
                 except Exception as e:
                     reply = f"Failed to stop process: {e}"
