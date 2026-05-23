@@ -144,7 +144,7 @@ def ensure_session_initialized(session_path: str, cfg: dict[Any, Any], config_di
             if not os.path.exists(target_md):
                 shutil.copy2(workspace_md_abs, target_md)
 
-    # 3. Create symlinks if configured
+    # 4. Create symlinks if configured
     symlinks = cfg.get("workspace_symlink_by_basename", {})
     if isinstance(symlinks, dict):
         for basename, target in symlinks.items():
@@ -272,7 +272,15 @@ async def process_chat(session_id: str, message: str) -> str:
         # Ensure session initialized
         ensure_session_initialized(session_path, cfg, config_dir)
 
-        exepath = cfg.get("gemini_exepath", "gemini")
+        # Determine agent for this session
+        agent_path = os.path.join(session_path, ".agent_type")
+        current_agent = "gemini-cli"
+        if os.path.exists(agent_path):
+            with open(agent_path, "r") as f:
+                current_agent = f.read().strip()
+        else:
+            current_agent = cfg.get("agent_type", "gemini-cli")
+
         # Determine model for this session
         model_path = os.path.join(session_path, ".model")
         current_model = None
@@ -281,7 +289,10 @@ async def process_chat(session_id: str, message: str) -> str:
                 current_model = f.read().strip()
 
         if not current_model:
-            current_model = cfg.get("gemini_model", "auto")
+            if current_agent == "pi-agent":
+                current_model = cfg.get("pi_agent_model", "auto")
+            else:
+                current_model = cfg.get("gemini_model", "auto")
 
         # Handle stop command
         if message.strip() == "!stop":
@@ -296,6 +307,30 @@ async def process_chat(session_id: str, message: str) -> str:
                     reply = f"Failed to stop process: {e}"
             else:
                 reply = "No active Gemini CLI process found for this session."
+            append_to_history(session_path, "bot", reply)
+            return reply
+
+        # Handle agent switching command
+        if message.startswith("!agent"):
+            append_to_history(session_path, "user", message)
+            parts = message.split(maxsplit=1)
+            agent_path = os.path.join(session_path, ".agent_type")
+            if len(parts) == 1:
+                current_agent = "gemini-cli"
+                if os.path.exists(agent_path):
+                    with open(agent_path, "r") as f:
+                        current_agent = f.read().strip()
+                reply = f"Current agent: {current_agent}"
+                append_to_history(session_path, "bot", reply)
+                return reply
+            new_agent = parts[1].strip()
+            if new_agent not in ("gemini-cli", "pi-agent"):
+                reply = "Invalid agent type. Supported: gemini-cli, pi-agent"
+                append_to_history(session_path, "bot", reply)
+                return reply
+            with open(agent_path, "w") as f:
+                f.write(new_agent)
+            reply = f"Agent switched to: {new_agent}"
             append_to_history(session_path, "bot", reply)
             return reply
 
@@ -370,36 +405,112 @@ async def process_chat(session_id: str, message: str) -> str:
             append_to_history(session_path, "bot", reply)
             return reply
 
-        args = cfg.get(
-            "gemini_args",
-            [
-                "--approval-mode",
-                "plan",
-                "--resume",
-                "latest",
-                "-p",
-            ],
-        )
-
-        # Inject --model into args if not already present or replace it
-        if "--model" in args:
-            new_args = list(args)
-            for idx, arg in enumerate(new_args):
-                if arg == "--model" and idx + 1 < len(new_args):
-                    new_args[idx + 1] = current_model
-                    break
-            args = new_args
-        else:
-            args += ["--model", current_model]
-
-        # Inject --resume latest if not already present
-        if "--resume" not in args:
-            args += ["--resume", "latest"]
-
-        cmd = [exepath] + args + ["-p", message]
-
         env = os.environ.copy()
         env["LIMILINK_SESSION"] = safe_session_id
+
+        if current_agent == "pi-agent":
+            # Create models.json in session directory
+            models_json_path = os.path.join(session_path, "models.json")
+
+            pi_base_url = cfg.get("pi_agent_openai_base_url")
+            if not pi_base_url:
+                raise RuntimeError(
+                    "Missing 'pi_agent_openai_base_url' in config.sxpb. Cannot start pi-agent without an LLM endpoint."
+                )
+
+            pi_api_key = cfg.get("pi_agent_openai_api_key")
+            if not pi_api_key:
+                raise RuntimeError(
+                    "Missing 'pi_agent_openai_api_key' in config.sxpb. Cannot start pi-agent without an API key."
+                )
+
+            pi_provider_name = cfg.get("pi_agent_provider_name", "local-ai")
+
+            if not os.path.exists(models_json_path):
+                models_config = {
+                    "providers": {
+                        pi_provider_name: {
+                            "baseUrl": pi_base_url,
+                            "apiKey": pi_api_key,
+                            "api": cfg.get(
+                                "pi_agent_provider_api", "openai-completions"
+                            ),
+                            "models": [
+                                {
+                                    "id": current_model,
+                                    "name": current_model,
+                                    "contextWindow": 128000,
+                                    "maxTokens": 16384,
+                                    "input": ["text"],
+                                }
+                            ],
+                        }
+                    }
+                }
+                with open(models_json_path, "w") as f:
+                    json.dump(models_config, f, indent=2)
+
+            exepath = cfg.get("pi_agent_exepath", "pi-agent")
+
+            # pi-agent env vars
+            env["PI_CODING_AGENT_DIR"] = session_path
+            env["OPENAI_API_KEY"] = pi_api_key
+
+            # Build pi-agent args
+            agent_args = []
+            agent_args += ["--model", current_model]
+            agent_args += ["--session-dir", ".pi-agent"]
+            # Specification of --session on the first run of a new session directory
+            # causes "No session found matching..." error. pi-agent should just
+            # use the isolated directory naturally.
+
+            if os.path.exists(os.path.join(session_path, "SYSTEM.md")):
+                agent_args += [
+                    "--system-prompt",
+                    os.path.abspath(os.path.join(session_path, "SYSTEM.md")),
+                ]
+            if os.path.exists(os.path.join(session_path, "ENTITY.md")):
+                agent_args += [
+                    "--append-system-prompt",
+                    os.path.abspath(os.path.join(session_path, "ENTITY.md")),
+                ]
+
+            # Add other configured args (ignoring ones we handled)
+            cfg_args = cfg.get("pi_agent_args", [])
+            for arg in cfg_args:
+                if arg not in ("--session-dir", "-p"):
+                    agent_args.append(arg)
+
+            cmd = [exepath] + agent_args + ["-p", message]
+        else:
+            exepath = cfg.get("gemini_exepath", "gemini")
+            args = cfg.get(
+                "gemini_args",
+                [
+                    "--approval-mode",
+                    "plan",
+                    "--resume",
+                    "latest",
+                    "-p",
+                ],
+            )
+
+            # Inject --model into args if not already present or replace it
+            if "--model" in args:
+                new_args = list(args)
+                for idx, arg in enumerate(new_args):
+                    if arg == "--model" and idx + 1 < len(new_args):
+                        new_args[idx + 1] = current_model
+                        break
+                args = new_args
+            else:
+                args += ["--model", current_model]
+
+            # Inject --resume latest if not already present
+            if "--resume" not in args:
+                args += ["--resume", "latest"]
+
+            cmd = [exepath] + args + ["-p", message]
 
         # Add configured environment variables (list format)
         cfg_env = cfg.get("gemini_env", [])
@@ -419,21 +530,24 @@ async def process_chat(session_id: str, message: str) -> str:
                 if isinstance(value, str):
                     env[name] = value
 
-        # Inject system.md path if configured
-        system_md_rel = cfg.get("gemini_system_md")
-        if system_md_rel:
-            system_md_rel = os.path.expanduser(system_md_rel)
-            system_md_abs = (
-                system_md_rel
-                if os.path.isabs(system_md_rel)
-                else os.path.abspath(os.path.join(config_dir, system_md_rel))
-            )
-            env["GEMINI_SYSTEM_MD"] = system_md_abs
-        elif "GEMINI_SYSTEM_MD" in env and not os.path.isabs(env["GEMINI_SYSTEM_MD"]):
-            # Fallback path logic if it was provided directly in env list
-            env["GEMINI_SYSTEM_MD"] = os.path.normpath(
-                os.path.join(config_dir, env["GEMINI_SYSTEM_MD"])
-            )
+        # Inject system.md path if configured (for gemini-cli)
+        if current_agent == "gemini-cli":
+            system_md_rel = cfg.get("gemini_system_md")
+            if system_md_rel:
+                system_md_rel = os.path.expanduser(system_md_rel)
+                system_md_abs = (
+                    system_md_rel
+                    if os.path.isabs(system_md_rel)
+                    else os.path.abspath(os.path.join(config_dir, system_md_rel))
+                )
+                env["GEMINI_SYSTEM_MD"] = system_md_abs
+            elif "GEMINI_SYSTEM_MD" in env and not os.path.isabs(
+                env["GEMINI_SYSTEM_MD"]
+            ):
+                # Fallback path logic if it was provided directly in env list
+                env["GEMINI_SYSTEM_MD"] = os.path.normpath(
+                    os.path.join(config_dir, env["GEMINI_SYSTEM_MD"])
+                )
 
         # Apply session environment overrides
         env_overrides_path = os.path.join(session_path, ".env_overrides.json")
@@ -451,33 +565,50 @@ async def process_chat(session_id: str, message: str) -> str:
 
         lock = get_session_lock(safe_session_id)
         async with lock:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=session_path,  # Execute within the isolated directory
-                env=env,
-                process_group=0,  # Create a new process group for easy cleanup
-            )
+            max_attempts = 3 if current_agent == "pi-agent" else 1
+            for attempt in range(max_attempts):
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=session_path,  # Execute within the isolated directory
+                    env=env,
+                    process_group=0,  # Create a new process group for easy cleanup
+                )
 
-            running_processes[safe_session_id] = process
-            try:
-                stdout, stderr = await process.communicate()
-            finally:
-                if running_processes.get(safe_session_id) == process:
-                    del running_processes[safe_session_id]
+                running_processes[safe_session_id] = process
+                try:
+                    stdout, stderr = await process.communicate()
+                finally:
+                    if running_processes.get(safe_session_id) == process:
+                        del running_processes[safe_session_id]
 
-            retcode = process.returncode
-            if retcode is None or retcode == 0:
-                reply_text = stdout.decode().strip()
-                reply_text = re.sub(r".*\n\[Thought: true\]", "", reply_text)
-            elif retcode < 0:
-                # Process was terminated by a signal (e.g., via !stop)
-                reply_text = f"Process terminated by signal {-retcode}."
-            else:
-                error_msg = stderr.decode().strip()
-                if "\n    at " in error_msg:
-                    error_msg = error_msg.split("\n    at ")[0].strip()
+                retcode = process.returncode
+                if retcode is None or retcode == 0:
+                    reply_text = stdout.decode().strip()
+                    reply_text = re.sub(r".*\n\[Thought: true\]", "", reply_text)
+                    if not reply_text and current_agent == "pi-agent":
+                        retcode = 1
+                        error_msg = "pi-agent exited 0 but produced no output."
+                    else:
+                        break  # Success
+                elif retcode < 0:
+                    # Process was terminated by a signal (e.g., via !stop)
+                    reply_text = f"Process terminated by signal {-retcode}."
+                    break  # Do not retry on signal
+                else:
+                    error_msg = stderr.decode().strip()
+                    if "\n    at " in error_msg:
+                        error_msg = error_msg.split("\n    at ")[0].strip()
+
+                if attempt < max_attempts - 1:
+                    print(
+                        f"Agent failed (retcode={retcode}, error={error_msg}). Retrying {attempt + 1}/{max_attempts}..."
+                    )
+                    await asyncio.sleep(2**attempt)
+                    continue
+
+                # If we reach here, it failed after max attempts
                 print(f"Gemini CLI Error: {error_msg}")
                 # Propagate common status codes (mapped to retcode % 256)
                 # 173 = 429 % 256

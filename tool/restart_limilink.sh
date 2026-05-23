@@ -37,11 +37,11 @@ if [[ -z "$BOT_PID" && -f "$(cd "$(dirname "$0")/.." && pwd)/session/bot.pid" ]]
 fi
 
 if [[ -z "$SERVER_PID" ]]; then
-  SERVER_PID=$(pgrep -f "pdm run server" | head -n 1)
+  SERVER_PID=$(pgrep -f "pdm run limilink$" | head -n 1)
 fi
 
 if [[ -z "$BOT_PID" ]]; then
-  BOT_PID=$(pgrep -f "pdm run discord_bot" | head -n 1)
+  BOT_PID=$(pgrep -f "pdm run limilink-discord$" | head -n 1)
 fi
 
 if [[ -z "$SERVER_PID" || -z "$BOT_PID" ]]; then
@@ -51,30 +51,48 @@ if [[ -z "$SERVER_PID" || -z "$BOT_PID" ]]; then
 fi
 
 RESTART_CMD=$(cat <<INNEREOF
+  # Get process group IDs to ensure we kill all children without orphaning them
+  SERVER_PGID=\$(ps -o pgid= -p "\$SERVER_PID" | tr -d ' ' 2>/dev/null)
+  BOT_PGID=\$(ps -o pgid= -p "\$BOT_PID" | tr -d ' ' 2>/dev/null)
+
   # Wait for specified delay
   sleep $DELAY
 
-  # Kill the existing processes
-  kill -TERM "$BOT_PID" 2>/dev/null
-  pkill -P "$BOT_PID" 2>/dev/null
-  kill -TERM "$SERVER_PID" 2>/dev/null
-  pkill -P "$SERVER_PID" 2>/dev/null
+  # Kill the existing processes and their process groups
+  if [[ -n "\$BOT_PGID" ]]; then
+    kill -TERM -"\$BOT_PGID" 2>/dev/null
+  else
+    kill -TERM "\$BOT_PID" 2>/dev/null
+  fi
+  
+  if [[ -n "\$SERVER_PGID" ]]; then
+    kill -TERM -"\$SERVER_PGID" 2>/dev/null
+  else
+    kill -TERM "\$SERVER_PID" 2>/dev/null
+  fi
 
   # Wait a bit
   sleep 10
   
   # Force kill
-  kill -9 "$BOT_PID" 2>/dev/null
-  kill -9 "$SERVER_PID" 2>/dev/null
-  pkill -9 -P "$BOT_PID" 2>/dev/null
-  pkill -9 -P "$SERVER_PID" 2>/dev/null
+  if [[ -n "\$BOT_PGID" ]]; then
+    kill -9 -"\$BOT_PGID" 2>/dev/null
+  else
+    kill -9 "\$BOT_PID" 2>/dev/null
+  fi
+
+  if [[ -n "\$SERVER_PGID" ]]; then
+    kill -9 -"\$SERVER_PGID" 2>/dev/null
+  else
+    kill -9 "\$SERVER_PID" 2>/dev/null
+  fi
 
   # Restart
   cd $(cd "$(dirname "$0")/.." && pwd)
   mkdir -p session
-  setsid pdm run limilink > session/server.log 2>&1 &
+  setsid /home/paprika/.local/bin/pdm run limilink > session/server.log 2>&1 &
   echo \$! > session/server.pid
-  setsid pdm run limilink-discord > session/discord_bot.log 2>&1 &
+  setsid /home/paprika/.local/bin/pdm run limilink-discord > session/discord_bot.log 2>&1 &
   echo \$! > session/bot.pid
 INNEREOF
 )
