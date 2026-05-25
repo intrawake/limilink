@@ -9,6 +9,13 @@ import signal
 import logging
 from typing import Any
 import sxpb
+
+try:
+    from opentelemetry import trace  # type: ignore
+
+    tracer = trace.get_tracer("limilink")
+except ImportError:
+    tracer = None
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -475,13 +482,7 @@ async def process_chat(session_id: str, message: str) -> str:
                     os.path.abspath(os.path.join(session_path, "ENTITY.md")),
                 ]
 
-            # Add other configured args (ignoring ones we handled)
-            cfg_args = cfg.get("pi_agent_args", [])
-            for arg in cfg_args:
-                if arg not in ("--session-dir", "-p"):
-                    agent_args.append(arg)
-
-            cmd = [exepath] + agent_args + ["-p", message]
+            cmd = [exepath] + agent_args + ["--continue", "-p", message]
         else:
             exepath = cfg.get("gemini_exepath", "gemini")
             args = cfg.get(
@@ -563,6 +564,13 @@ async def process_chat(session_id: str, message: str) -> str:
         # Append user message to history
         append_to_history(session_path, "user", message)
 
+        if tracer:
+            span = trace.get_current_span()
+            span.set_attribute("limilink.session_id", safe_session_id)
+            span.set_attribute("limilink.agent", current_agent)
+            span.set_attribute("limilink.message", message)
+            span.set_attribute("limilink.model", current_model)
+
         lock = get_session_lock(safe_session_id)
         async with lock:
             max_attempts = 3 if current_agent == "pi-agent" else 1
@@ -578,7 +586,12 @@ async def process_chat(session_id: str, message: str) -> str:
 
                 running_processes[safe_session_id] = process
                 try:
-                    stdout, stderr = await process.communicate()
+                    if tracer:
+                        with tracer.start_as_current_span("agent_execute") as subspan:
+                            subspan.set_attribute("agent.command", " ".join(cmd))
+                            stdout, stderr = await process.communicate()
+                    else:
+                        stdout, stderr = await process.communicate()
                 finally:
                     if running_processes.get(safe_session_id) == process:
                         del running_processes[safe_session_id]
