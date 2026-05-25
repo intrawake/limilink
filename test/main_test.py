@@ -41,7 +41,6 @@ def test_delete_session():
 
 
 @pytest.mark.asyncio
-@patch.dict(os.environ, {"LIMILINK_CONFIG": "/tmp/nonexistent_limilink_config.sxpb"})
 @patch("main.asyncio.create_subprocess_exec")
 async def test_chat_endpoint_invokes_gemini(mock_exec, test_sessions_dir):
     # Setup mock subprocess
@@ -50,11 +49,16 @@ async def test_chat_endpoint_invokes_gemini(mock_exec, test_sessions_dir):
     mock_process.communicate.return_value = (b"mocked response from gemini", b"")
     mock_exec.return_value = mock_process
 
-    # Use TestClient with 'with' block to ensure app startup/shutdown
-    with TestClient(app) as c:
-        response = c.post(
-            "/chat", json={"message": "hello test", "session_id": "test_chat_session"}
-        )
+    preset_config_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "preset", "config.sxpb")
+    )
+    with patch.dict(os.environ, {"LIMILINK_CONFIG": preset_config_path}):
+        # Use TestClient with 'with' block to ensure app startup/shutdown
+        with TestClient(app) as c:
+            response = c.post(
+                "/chat",
+                json={"message": "hello test", "session_id": "test_chat_session"},
+            )
 
     assert response.status_code == 200
     assert response.json() == {"reply": "mocked response from gemini"}
@@ -70,7 +74,7 @@ async def test_chat_endpoint_invokes_gemini(mock_exec, test_sessions_dir):
     # Verify some key arguments
     assert called_args[0] == "gemini"
     assert "--model" in called_args
-    # We now expect auto as it's the default in src/main.py
+    # We expect auto as it's the default in the preset config
     assert "auto" in called_args
     assert "-p" in called_args
     assert "hello test" in called_args
@@ -154,6 +158,7 @@ async def test_model_switching_with_existing_model_arg(mock_exec, mock_load_conf
     # Return a mocked config that already has --model
     mock_load_config.return_value = (
         {
+            "agent_by_alias": {"gemini-cli": {"harness": "gemini-cli"}},
             "gemini_args": [
                 "--approval-mode",
                 "plan",
@@ -161,7 +166,6 @@ async def test_model_switching_with_existing_model_arg(mock_exec, mock_load_conf
                 "gemini-1.5-pro",
                 "-p",
             ],
-            "gemini_model": "gemini-1.5-pro",
         },
         "/tmp",
     )
@@ -254,6 +258,7 @@ async def test_env_vars_injection(mock_exec, mock_load_config):
     # Mock config with both gemini_env (list) and gemini_env_dict (dict)
     mock_load_config.return_value = (
         {
+            "agent_by_alias": {"gemini-cli": {"harness": "gemini-cli"}},
             "gemini_env": [{"name": "VAR_LIST", "value": "val_list"}],
             "gemini_env_dict": {"VAR_DICT": "val_dict", "VAR_OVERRIDE": "new_val"},
             "gemini_args": ["-p"],
@@ -288,7 +293,13 @@ async def test_env_vars_dict_only(mock_exec, mock_load_config):
     mock_process.communicate.return_value = (b"mocked response", b"")
     mock_exec.return_value = mock_process
 
-    mock_load_config.return_value = ({"gemini_env_dict": {"MY_VAR": "my_val"}}, "/tmp")
+    mock_load_config.return_value = (
+        {
+            "agent_by_alias": {"gemini-cli": {"harness": "gemini-cli"}},
+            "gemini_env_dict": {"MY_VAR": "my_val"},
+        },
+        "/tmp",
+    )
 
     session_id = "test_env_dict_session"
 

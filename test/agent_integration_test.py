@@ -10,6 +10,10 @@ def mock_config():
     with patch("main.load_config") as mock:
         mock.return_value = (
             {
+                "agent_by_alias": {
+                    "gemini-cli": {"harness": "gemini-cli"},
+                    "pi-agent": {"harness": "pi"},
+                },
                 "pi_agent_openai_base_url": "http://test-host:11435/v1",
                 "pi_agent_openai_api_key": "test-sk-key",
             },
@@ -86,5 +90,5 @@ async def test_pi_agent_env_vars(mock_exec, mock_config):
     # Check env vars passed to subprocess
     env = mock_exec.call_args[1]["env"]
     assert "PI_CODING_AGENT_DIR" in env
-    assert "OPENAI_API_KEY" in env
-    assert env["OPENAI_API_KEY"] == "test-sk-key"
+    # API key is delivered via models.json, not env vars
+    assert "OPENAI_API_KEY" not in env

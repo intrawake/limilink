@@ -30,7 +30,9 @@ def slow_gemini_config(tmp_path):
     mock_gemini.chmod(mock_gemini.stat().st_mode | stat.S_IEXEC)
 
     config_path = tmp_path / "config.sxpb"
-    config_path.write_text(f'(gemini_exepath "{mock_gemini}")')
+    config_path.write_text(
+        f'(agent_by_alias () (gemini-cli (harness gemini-cli))) (gemini_exepath "{mock_gemini}")'
+    )
 
     return str(config_path)
 

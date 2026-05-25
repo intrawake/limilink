@@ -8,6 +8,7 @@ import json
 import signal
 import logging
 from typing import Any
+from enum import Enum
 import sxpb
 
 try:
@@ -21,6 +22,20 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 app = FastAPI()
+
+
+class HarnessType(str, Enum):
+    GEMINI_CLI = "gemini-cli"
+    PI = "pi"
+
+    @classmethod
+    def from_str(cls, value: str) -> HarnessType:
+        if value in ("gemini", "gemini-cli"):
+            return cls.GEMINI_CLI
+        if value in ("pi", "pi-agent"):
+            return cls.PI
+        raise ValueError(f"Unsupported harness type: {value}")
+
 
 # Global tracker for running Gemini CLI processes (session_id -> process)
 running_processes: dict[str, asyncio.subprocess.Process] = {}
@@ -264,6 +279,46 @@ async def get_session_history(session_id: str):
     return {"history": load_session_history(session_path)}
 
 
+PI_PROVIDER_NAME = "default-provider"
+
+
+def write_pi_models_json(
+    session_path: str,
+    preset: dict[Any, Any],
+    cfg: dict[Any, Any],
+    model: str,
+):
+    """Write models.json for a pi-agent session based on the given preset and model."""
+    pi_base_url = preset.get("openai_base_url") or cfg.get("pi_agent_openai_base_url")
+    if not pi_base_url:
+        return
+    pi_api_key = preset.get("openai_api_key") or cfg.get("pi_agent_openai_api_key")
+    if not pi_api_key:
+        return
+    models_config = {
+        "providers": {
+            PI_PROVIDER_NAME: {
+                "baseUrl": pi_base_url,
+                "apiKey": pi_api_key,
+                "api": preset.get("provider_api")
+                or cfg.get("pi_agent_provider_api", "openai-completions"),
+                "models": [
+                    {
+                        "id": model,
+                        "name": model,
+                        "contextWindow": 128000,
+                        "maxTokens": 16384,
+                        "input": ["text"],
+                    }
+                ],
+            }
+        }
+    }
+    models_json_path = os.path.join(session_path, "models.json")
+    with open(models_json_path, "w") as f:
+        json.dump(models_config, f, indent=2)
+
+
 async def process_chat(session_id: str, message: str) -> str:
     try:
         # Secure the session_id to prevent directory traversal
@@ -279,14 +334,29 @@ async def process_chat(session_id: str, message: str) -> str:
         # Ensure session initialized
         ensure_session_initialized(session_path, cfg, config_dir)
 
-        # Determine agent for this session
+        # Determine agent alias for this session
+        agent_by_alias = cfg.get("agent_by_alias", {})
+        if not agent_by_alias:
+            raise RuntimeError("Missing 'agent_by_alias' in config.sxpb")
+
         agent_path = os.path.join(session_path, ".agent_type")
-        current_agent = "gemini-cli"
         if os.path.exists(agent_path):
             with open(agent_path, "r") as f:
-                current_agent = f.read().strip()
+                agent_alias = f.read().strip()
         else:
-            current_agent = cfg.get("agent_type", "gemini-cli")
+            # Default to the first agent defined in the config
+            agent_alias = list(agent_by_alias.keys())[0]
+
+        # Resolve preset if it exists
+        preset = agent_by_alias.get(agent_alias, {})
+
+        # Determine and normalize harness
+        harness_str = preset.get("harness", agent_alias)
+        try:
+            harness = HarnessType.from_str(harness_str)
+        except ValueError:
+            # Fallback for old/direct values if not in agent_by_alias
+            harness = HarnessType.GEMINI_CLI  # Default fallback
 
         # Determine model for this session
         model_path = os.path.join(session_path, ".model")
@@ -296,10 +366,12 @@ async def process_chat(session_id: str, message: str) -> str:
                 current_model = f.read().strip()
 
         if not current_model:
-            if current_agent == "pi-agent":
+            if preset.get("model"):
+                current_model = preset.get("model")
+            elif harness == HarnessType.PI:
                 current_model = cfg.get("pi_agent_model", "auto")
             else:
-                current_model = cfg.get("gemini_model", "auto")
+                current_model = "auto"
 
         # Handle stop command
         if message.strip() == "!stop":
@@ -323,20 +395,37 @@ async def process_chat(session_id: str, message: str) -> str:
             parts = message.split(maxsplit=1)
             agent_path = os.path.join(session_path, ".agent_type")
             if len(parts) == 1:
-                current_agent = "gemini-cli"
+                current_agent_str = "gemini-cli"
                 if os.path.exists(agent_path):
                     with open(agent_path, "r") as f:
-                        current_agent = f.read().strip()
-                reply = f"Current agent: {current_agent}"
+                        current_agent_str = f.read().strip()
+                reply = f"Current agent: {current_agent_str}"
                 append_to_history(session_path, "bot", reply)
                 return reply
             new_agent = parts[1].strip()
-            if new_agent not in ("gemini-cli", "pi-agent"):
-                reply = "Invalid agent type. Supported: gemini-cli, pi-agent"
+
+            # Valid agents are aliases OR raw harness types
+            valid_agents = (
+                list(HarnessType) + ["gemini", "pi-agent"] + list(agent_by_alias.keys())
+            )
+            if new_agent not in valid_agents:
+                reply = f"Invalid agent. Supported aliases or harnesses: {', '.join(valid_agents)}"
                 append_to_history(session_path, "bot", reply)
                 return reply
             with open(agent_path, "w") as f:
                 f.write(new_agent)
+
+            # If switching to a pi harness, regenerate models.json for the new preset
+            new_preset = agent_by_alias.get(new_agent, {})
+            new_harness_str = new_preset.get("harness", new_agent)
+            try:
+                new_harness = HarnessType.from_str(new_harness_str)
+            except ValueError:
+                new_harness = HarnessType.GEMINI_CLI
+            if new_harness == HarnessType.PI:
+                new_model = new_preset.get("model") or cfg.get("pi_agent_model", "auto")
+                write_pi_models_json(session_path, new_preset, cfg, new_model)
+
             reply = f"Agent switched to: {new_agent}"
             append_to_history(session_path, "bot", reply)
             return reply
@@ -352,6 +441,11 @@ async def process_chat(session_id: str, message: str) -> str:
             new_model = parts[1].strip()
             with open(model_path, "w") as f:
                 f.write(new_model)
+
+            # If current harness is pi, regenerate models.json with the new model
+            if harness == HarnessType.PI:
+                write_pi_models_json(session_path, preset, cfg, new_model)
+
             reply = f"Model switched to: {new_model}"
             append_to_history(session_path, "bot", reply)
             return reply
@@ -415,56 +509,37 @@ async def process_chat(session_id: str, message: str) -> str:
         env = os.environ.copy()
         env["LIMILINK_SESSION"] = safe_session_id
 
-        if current_agent == "pi-agent":
-            # Create models.json in session directory
-            models_json_path = os.path.join(session_path, "models.json")
-
-            pi_base_url = cfg.get("pi_agent_openai_base_url")
+        if harness == HarnessType.PI:
+            pi_base_url = preset.get("openai_base_url") or cfg.get(
+                "pi_agent_openai_base_url"
+            )
             if not pi_base_url:
                 raise RuntimeError(
                     "Missing 'pi_agent_openai_base_url' in config.sxpb. Cannot start pi-agent without an LLM endpoint."
                 )
 
-            pi_api_key = cfg.get("pi_agent_openai_api_key")
+            pi_api_key = preset.get("openai_api_key") or cfg.get(
+                "pi_agent_openai_api_key"
+            )
             if not pi_api_key:
                 raise RuntimeError(
                     "Missing 'pi_agent_openai_api_key' in config.sxpb. Cannot start pi-agent without an API key."
                 )
 
-            pi_provider_name = cfg.get("pi_agent_provider_name", "local-ai")
-
+            # Write models.json only if it doesn't exist yet (first run).
+            # Subsequent changes go through !agent / !model which rewrite it.
+            models_json_path = os.path.join(session_path, "models.json")
             if not os.path.exists(models_json_path):
-                models_config = {
-                    "providers": {
-                        pi_provider_name: {
-                            "baseUrl": pi_base_url,
-                            "apiKey": pi_api_key,
-                            "api": cfg.get(
-                                "pi_agent_provider_api", "openai-completions"
-                            ),
-                            "models": [
-                                {
-                                    "id": current_model,
-                                    "name": current_model,
-                                    "contextWindow": 128000,
-                                    "maxTokens": 16384,
-                                    "input": ["text"],
-                                }
-                            ],
-                        }
-                    }
-                }
-                with open(models_json_path, "w") as f:
-                    json.dump(models_config, f, indent=2)
+                write_pi_models_json(session_path, preset, cfg, current_model)
 
             exepath = cfg.get("pi_agent_exepath", "pi-agent")
 
             # pi-agent env vars
             env["PI_CODING_AGENT_DIR"] = session_path
-            env["OPENAI_API_KEY"] = pi_api_key
 
             # Build pi-agent args
             agent_args = []
+            agent_args += ["--provider", PI_PROVIDER_NAME]
             agent_args += ["--model", current_model]
             agent_args += ["--session-dir", ".pi-agent"]
             # Specification of --session on the first run of a new session directory
@@ -485,7 +560,7 @@ async def process_chat(session_id: str, message: str) -> str:
             cmd = [exepath] + agent_args + ["--continue", "-p", message]
         else:
             exepath = cfg.get("gemini_exepath", "gemini")
-            args = cfg.get(
+            args = preset.get("args") or cfg.get(
                 "gemini_args",
                 [
                     "--approval-mode",
@@ -531,8 +606,15 @@ async def process_chat(session_id: str, message: str) -> str:
                 if isinstance(value, str):
                     env[name] = value
 
+        # Merge preset env_dict if present
+        preset_env_dict = preset.get("env_dict", {})
+        if isinstance(preset_env_dict, dict):
+            for name, value in preset_env_dict.items():
+                if isinstance(value, str):
+                    env[name] = value
+
         # Inject system.md path if configured (for gemini-cli)
-        if current_agent == "gemini-cli":
+        if harness == HarnessType.GEMINI_CLI:
             system_md_rel = cfg.get("gemini_system_md")
             if system_md_rel:
                 system_md_rel = os.path.expanduser(system_md_rel)
@@ -567,13 +649,13 @@ async def process_chat(session_id: str, message: str) -> str:
         if tracer:
             span = trace.get_current_span()
             span.set_attribute("limilink.session_id", safe_session_id)
-            span.set_attribute("limilink.agent", current_agent)
+            span.set_attribute("limilink.agent", harness.value)
             span.set_attribute("limilink.message", message)
             span.set_attribute("limilink.model", current_model)
 
         lock = get_session_lock(safe_session_id)
         async with lock:
-            max_attempts = 3 if current_agent == "pi-agent" else 1
+            max_attempts = 3 if harness == HarnessType.PI else 1
             for attempt in range(max_attempts):
                 process = await asyncio.create_subprocess_exec(
                     *cmd,
@@ -600,7 +682,7 @@ async def process_chat(session_id: str, message: str) -> str:
                 if retcode is None or retcode == 0:
                     reply_text = stdout.decode().strip()
                     reply_text = re.sub(r".*\n\[Thought: true\]", "", reply_text)
-                    if not reply_text and current_agent == "pi-agent":
+                    if not reply_text and harness == HarnessType.PI:
                         retcode = 1
                         error_msg = "pi-agent exited 0 but produced no output."
                     else:
