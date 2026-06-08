@@ -92,3 +92,86 @@ async def test_pi_agent_env_vars(mock_exec, mock_config):
     assert "PI_CODING_AGENT_DIR" in env
     # API key is delivered via models.json, not env vars
     assert "OPENAI_API_KEY" not in env
+
+
+@pytest.mark.asyncio
+async def test_stat_gemini_cli_harness(mock_config):
+    """!stat on gemini-cli harness should say it's pi-only."""
+    session_id = "test_stat_gemini"
+
+    with TestClient(app) as c:
+        response = c.post(
+            "/chat",
+            json={"message": "!stat", "session_id": session_id},
+        )
+        assert response.status_code == 200
+        assert "only available for the pi harness" in response.json()["reply"]
+
+
+@pytest.mark.asyncio
+async def test_stat_pi_no_data(mock_config):
+    """!stat on pi-agent with no .pi-agent dir should say no data."""
+    session_id = "test_stat_pi_no_data"
+
+    with TestClient(app) as c:
+        # Switch to pi-agent
+        c.post(
+            "/chat",
+            json={"message": "!agent pi-agent", "session_id": session_id},
+        )
+
+        # Try stat without any chat history
+        response = c.post(
+            "/chat",
+            json={"message": "!stat", "session_id": session_id},
+        )
+        assert response.status_code == 200
+        assert "No pi-agent session data found" in response.json()["reply"]
+
+
+@pytest.mark.asyncio
+@patch("main.asyncio.create_subprocess_exec")
+async def test_stat_pi_with_data(mock_exec, mock_config, test_sessions_dir):
+    """!stat on pi-agent with jsonl data should return stat output."""
+    import os as _os
+
+    session_id = "test_stat_pi_data"
+    session_path = _os.path.join(test_sessions_dir, session_id)
+    pi_agent_dir = _os.path.join(session_path, ".pi-agent")
+    _os.makedirs(pi_agent_dir, exist_ok=True)
+
+    # Mark session as pi-agent and create dummy jsonl
+    _os.makedirs(session_path, exist_ok=True)
+    with open(_os.path.join(session_path, ".agent_type"), "w") as f:
+        f.write("pi-agent")
+    with open(_os.path.join(pi_agent_dir, "test.jsonl"), "w") as f:
+        f.write('{"type":"session","cwd":"/test"}\n')
+
+    # Mock the stat subprocess (called by !stat, not the LLM)
+    stat_process = AsyncMock()
+    stat_process.returncode = 0
+    stat_process.communicate.return_value = (
+        b"Session: test.jsonl\nModel: auto\nContext Window: 128,000 tokens\n",
+        b"",
+    )
+
+    # The first call to create_subprocess_exec is the stat script;
+    # later calls would be the LLM but !stat returns early.
+    mock_exec.return_value = stat_process
+
+    with TestClient(app) as c:
+        response = c.post(
+            "/chat",
+            json={"message": "!stat", "session_id": session_id},
+        )
+        assert response.status_code == 200
+        reply = response.json()["reply"]
+        assert "Session: test.jsonl" in reply
+        assert "Context Window" in reply
+
+    # Verify stat subprocess was called with correct args
+    mock_exec.assert_called_once()
+    cmd = mock_exec.call_args[0]
+    assert cmd[0] == "python3"
+    assert cmd[1].endswith("pi_session_stat.py")
+    assert cmd[2].endswith("test.jsonl")

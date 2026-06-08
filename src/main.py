@@ -528,6 +528,52 @@ async def process_chat(session_id: str, message: str) -> str:
             append_to_history(session_path, "bot", reply)
             return reply
 
+        # Handle stat command (pi harness only)
+        if message.strip() == "!stat":
+            append_to_history(session_path, "user", message)
+            if harness != HarnessType.PI:
+                reply = "!stat is only available for the pi harness."
+                append_to_history(session_path, "bot", reply)
+                return reply
+
+            pi_agent_dir = os.path.join(session_path, ".pi-agent")
+            jsonl_files = (
+                sorted([f for f in os.listdir(pi_agent_dir) if f.endswith(".jsonl")])
+                if os.path.isdir(pi_agent_dir)
+                else []
+            )
+            if not jsonl_files:
+                reply = "No pi-agent session data found. Send a message first!"
+                append_to_history(session_path, "bot", reply)
+                return reply
+
+            stat_script = os.path.normpath(
+                os.path.join(
+                    os.path.dirname(__file__), "..", "tool", "pi_session_stat.py"
+                )
+            )
+            try:
+                stat_env = os.environ.copy()
+                stat_env["PI_CODING_AGENT_DIR"] = session_path
+                stat_result = await asyncio.create_subprocess_exec(
+                    "python3",
+                    stat_script,
+                    os.path.join(pi_agent_dir, jsonl_files[-1]),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=session_path,
+                    env=stat_env,
+                )
+                stdout, stderr = await stat_result.communicate()
+                if stat_result.returncode == 0:
+                    reply = stdout.decode().strip()
+                else:
+                    reply = f"Stat failed: {stderr.decode().strip()}"
+            except Exception as e:
+                reply = f"Stat error: {e}"
+            append_to_history(session_path, "bot", reply)
+            return reply
+
         env = os.environ.copy()
         env["LIMILINK_SESSION"] = safe_session_id
 
