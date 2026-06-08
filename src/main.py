@@ -209,14 +209,33 @@ async def list_sessions():
 
 
 @app.post("/sessions/{session_id}")
-async def create_session(session_id: str):
+async def create_session(session_id: str, agent: str | None = None):
     cfg, config_dir = load_config()
     sessions_dir = get_sessions_dir(cfg, config_dir)
     safe_id = sanitize_session_id(session_id)
+
+    # Validate agent if provided
+    if agent is not None:
+        agent_by_alias = cfg.get("agent_by_alias", {})
+        valid_agents = (
+            list(HarnessType) + ["gemini", "pi-agent"] + list(agent_by_alias.keys())
+        )
+        if agent not in valid_agents:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid agent '{agent}'. Supported: {', '.join(sorted(set(valid_agents)))}",
+            )
+
     session_path = os.path.join(sessions_dir, safe_id)
     os.makedirs(session_path, exist_ok=True)
 
     ensure_session_initialized(session_path, cfg, config_dir)
+
+    # Write .agent_type if an agent was specified
+    if agent is not None:
+        agent_path = os.path.join(session_path, ".agent_type")
+        with open(agent_path, "w") as f:
+            f.write(agent)
 
     return {"status": "created", "session_id": safe_id}
 

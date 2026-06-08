@@ -161,13 +161,38 @@ async def on_message(message):
 
     channel_id_str = str(message.channel.id)
 
-    if message.content.strip() == "!new":
+    if message.content.strip().startswith("!new"):
+        parts = message.content.strip().split(maxsplit=1)
+        agent_arg = parts[1].strip() if len(parts) > 1 else None
+
         new_session_id = f"discord_channel_{channel_id_str}_{uuid.uuid4().hex[:8]}"
+
+        # Call the server to create the session (and validate agent if provided)
+        try:
+            async with httpx.AsyncClient() as http_client:
+                create_url = f"http://localhost:{port}/sessions/{new_session_id}"
+                if agent_arg:
+                    create_url += f"?agent={agent_arg}"
+                create_resp = await http_client.post(create_url)
+                if create_resp.status_code != 200:
+                    detail = "Unknown error"
+                    try:
+                        detail = create_resp.json().get("detail", create_resp.text)
+                    except Exception:
+                        detail = create_resp.text
+                    await message.channel.send(f"⚠️ Failed to create session: {detail}")
+                    return
+        except Exception as e:
+            await message.channel.send(f"⚠️ Error communicating with Limilink: {e}")
+            return
+
         channel_sessions[channel_id_str] = new_session_id
         save_sessions()
-        await message.channel.send(
-            f"🔄 Started a fresh Limilink session for this channel! (Session ID: `{new_session_id}`)"
-        )
+
+        msg = f"🔄 Started a fresh Limilink session for this channel! (Session ID: `{new_session_id}`)"
+        if agent_arg:
+            msg += f"\n🤖 Agent: `{agent_arg}`"
+        await message.channel.send(msg)
         return
 
     if channel_id_str not in channel_sessions:

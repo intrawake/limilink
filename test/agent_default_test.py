@@ -1,6 +1,7 @@
 """Tests for default agent selection and agent_by_alias validation."""
 
 from __future__ import annotations
+import os
 import pytest
 from unittest.mock import patch, AsyncMock
 from fastapi.testclient import TestClient
@@ -119,3 +120,84 @@ async def test_chat_fails_when_agent_by_alias_empty(
         assert response.status_code == 500
         detail = response.json()["detail"]
         assert "agent_by_alias" in detail.lower()
+
+
+def test_create_session_with_valid_agent(mock_config_pi_first, test_sessions_dir):
+    """POST /sessions/{id}?agent=<valid> should create the session
+    and write the .agent_type file."""
+    session_id = "test_create_with_agent"
+
+    with TestClient(app) as c:
+        # Create a session specifying gemini-cli as the agent
+        response = c.post(f"/sessions/{session_id}?agent=gemini-cli")
+        assert response.status_code == 200
+        assert response.json()["status"] == "created"
+
+    # Verify .agent_type was written
+    session_path = test_sessions_dir + "/" + session_id
+    agent_file = session_path + "/.agent_type"
+    assert os.path.exists(agent_file)
+    with open(agent_file, "r") as f:
+        assert f.read().strip() == "gemini-cli"
+
+
+def test_create_session_with_invalid_agent_fails(mock_config_pi_first):
+    """POST /sessions/{id}?agent=<bogus> should return 400."""
+    session_id = "test_create_bad_agent"
+
+    with TestClient(app) as c:
+        response = c.post(f"/sessions/{session_id}?agent=nonexistent-agent")
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert "Invalid agent" in detail
+        assert "nonexistent-agent" in detail
+
+
+def test_create_session_with_pi_agent(mock_config_pi_first, test_sessions_dir):
+    """POST /sessions/{id}?agent=pi-agent should work when pi-agent
+    is in agent_by_alias."""
+    session_id = "test_create_pi_agent"
+
+    with TestClient(app) as c:
+        response = c.post(f"/sessions/{session_id}?agent=pi-agent")
+        assert response.status_code == 200
+        assert response.json()["status"] == "created"
+
+    session_path = test_sessions_dir + "/" + session_id
+    agent_file = session_path + "/.agent_type"
+    assert os.path.exists(agent_file)
+    with open(agent_file, "r") as f:
+        assert f.read().strip() == "pi-agent"
+
+
+def test_create_session_without_agent_no_agent_type(
+    mock_config_pi_first, test_sessions_dir
+):
+    """POST /sessions/{id} without agent param should NOT create .agent_type."""
+    session_id = "test_create_no_agent"
+
+    with TestClient(app) as c:
+        response = c.post(f"/sessions/{session_id}")
+        assert response.status_code == 200
+
+    session_path = test_sessions_dir + "/" + session_id
+    agent_file = session_path + "/.agent_type"
+    assert not os.path.exists(agent_file)
+
+
+def test_create_session_with_first_agent_in_alias(
+    mock_config_pi_first, test_sessions_dir
+):
+    """POST /sessions/{id}?agent=pi-agent (first in agent_by_alias)
+    should succeed and write .agent_type."""
+    session_id = "test_create_first_agent"
+
+    with TestClient(app) as c:
+        response = c.post(f"/sessions/{session_id}?agent=pi-agent")
+        assert response.status_code == 200
+
+    session_path = test_sessions_dir + "/" + session_id
+    agent_file = session_path + "/.agent_type"
+    assert os.path.exists(agent_file)
+    with open(agent_file, "r") as f:
+        assert f.read().strip() == "pi-agent"
