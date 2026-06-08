@@ -16,28 +16,33 @@ def test_list_sessions_empty():
 
 
 def test_create_session():
-    response = client.post("/sessions/test_session_1")
+    response = client.post("/sessions")
     assert response.status_code == 200
-    assert response.json() == {"status": "created", "session_id": "test_session_1"}
+    data = response.json()
+    assert data["status"] == "created"
+    session_id = data["session_id"]
+    assert session_id.startswith("session_")
 
     response = client.get("/sessions")
     assert response.status_code == 200
-    assert response.json() == {"sessions": ["test_session_1"]}
+    assert session_id in response.json()["sessions"]
 
 
 def test_delete_session():
-    client.post("/sessions/test_session_to_delete")
+    create_resp = client.post("/sessions")
+    assert create_resp.status_code == 200
+    session_id = create_resp.json()["session_id"]
 
-    response = client.delete("/sessions/test_session_to_delete")
+    response = client.delete(f"/sessions/{session_id}")
     assert response.status_code == 200
     assert response.json() == {
         "status": "deleted",
-        "session_id": "test_session_to_delete",
+        "session_id": session_id,
     }
 
     response = client.get("/sessions")
     assert response.status_code == 200
-    assert "test_session_to_delete" not in response.json()["sessions"]
+    assert session_id not in response.json()["sessions"]
 
 
 @pytest.mark.asyncio
@@ -88,9 +93,9 @@ def test_create_session_initialization(test_sessions_dir):
         os.path.join(os.path.dirname(__file__), "..", "preset", "config.sxpb")
     )
     with patch.dict(os.environ, {"LIMILINK_CONFIG": preset_config_path}):
-        session_id = "test_init_session"
-        response = client.post(f"/sessions/{session_id}")
+        response = client.post("/sessions")
         assert response.status_code == 200
+        session_id = response.json()["session_id"]
 
         session_path = os.path.join(test_sessions_dir, session_id)
         assert os.path.exists(session_path)

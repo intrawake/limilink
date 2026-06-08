@@ -3,7 +3,6 @@ from discord.ext import tasks
 import os
 import httpx
 import json
-import uuid
 import tempfile
 import atexit
 import signal
@@ -165,12 +164,10 @@ async def on_message(message):
         parts = message.content.strip().split(maxsplit=1)
         agent_arg = parts[1].strip() if len(parts) > 1 else None
 
-        new_session_id = f"discord_channel_{channel_id_str}_{uuid.uuid4().hex[:8]}"
-
-        # Call the server to create the session (and validate agent if provided)
+        # Ask the server to create a new session (server generates the ID)
         try:
             async with httpx.AsyncClient() as http_client:
-                create_url = f"http://localhost:{port}/sessions/{new_session_id}"
+                create_url = f"http://localhost:{port}/sessions"
                 if agent_arg:
                     create_url += f"?agent={agent_arg}"
                 create_resp = await http_client.post(create_url)
@@ -182,6 +179,7 @@ async def on_message(message):
                         detail = create_resp.text
                     await message.channel.send(f"⚠️ Failed to create session: {detail}")
                     return
+                new_session_id = create_resp.json()["session_id"]
         except Exception as e:
             await message.channel.send(f"⚠️ Error communicating with Limilink: {e}")
             return

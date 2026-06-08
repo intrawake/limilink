@@ -7,6 +7,7 @@ import asyncio
 import json
 import signal
 import logging
+import uuid
 from typing import Any
 from enum import Enum
 import sxpb
@@ -208,10 +209,11 @@ async def list_sessions():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/sessions/{session_id}")
-async def create_session(session_id: str, agent: str | None = None):
+@app.post("/sessions")
+async def create_session(agent: str | None = None):
     cfg, config_dir = load_config()
     sessions_dir = get_sessions_dir(cfg, config_dir)
+    session_id = f"session_{uuid.uuid4().hex[:8]}"
     safe_id = sanitize_session_id(session_id)
 
     # Validate agent if provided

@@ -62,19 +62,18 @@ def mock_config_empty_agent_by_alias():
 async def test_default_agent_is_first_in_agent_by_alias(
     mock_exec, mock_config_pi_first
 ):
-    """After !new session (no .agent_type file), !agent should report
+    """After a fresh session (no .agent_type file), !agent should report
     the *first* agent listed in agent_by_alias, not a hardcoded default."""
     mock_process = AsyncMock()
     mock_process.returncode = 0
     mock_process.communicate.return_value = (b"mocked response", b"")
     mock_exec.return_value = mock_process
 
-    session_id = "test_default_agent_first"
-
     with TestClient(app) as c:
-        # Create a fresh session (equivalent to !new)
-        create_resp = c.post(f"/sessions/{session_id}")
+        # Create a fresh session (server generates the ID)
+        create_resp = c.post("/sessions")
         assert create_resp.status_code == 200
+        session_id = create_resp.json()["session_id"]
 
         # Ask for the current agent — should be first in agent_by_alias
         response = c.post(
@@ -123,30 +122,28 @@ async def test_chat_fails_when_agent_by_alias_empty(
 
 
 def test_create_session_with_valid_agent(mock_config_pi_first, test_sessions_dir):
-    """POST /sessions/{id}?agent=<valid> should create the session
-    and write the .agent_type file."""
-    session_id = "test_create_with_agent"
-
+    """POST /sessions?agent=<valid> should create the session,
+    return its ID, and write the .agent_type file."""
     with TestClient(app) as c:
-        # Create a session specifying gemini-cli as the agent
-        response = c.post(f"/sessions/{session_id}?agent=gemini-cli")
+        response = c.post("/sessions?agent=gemini-cli")
         assert response.status_code == 200
-        assert response.json()["status"] == "created"
+        data = response.json()
+        assert data["status"] == "created"
+        session_id = data["session_id"]
+        assert session_id.startswith("session_")
 
-    # Verify .agent_type was written
-    session_path = test_sessions_dir + "/" + session_id
-    agent_file = session_path + "/.agent_type"
+    # Verify .agent_type was written with the correct agent
+    session_path = os.path.join(test_sessions_dir, session_id)
+    agent_file = os.path.join(session_path, ".agent_type")
     assert os.path.exists(agent_file)
-    with open(agent_file, "r") as f:
+    with open(agent_file) as f:
         assert f.read().strip() == "gemini-cli"
 
 
 def test_create_session_with_invalid_agent_fails(mock_config_pi_first):
-    """POST /sessions/{id}?agent=<bogus> should return 400."""
-    session_id = "test_create_bad_agent"
-
+    """POST /sessions?agent=<bogus> should return 400."""
     with TestClient(app) as c:
-        response = c.post(f"/sessions/{session_id}?agent=nonexistent-agent")
+        response = c.post("/sessions?agent=nonexistent-agent")
         assert response.status_code == 400
         detail = response.json()["detail"]
         assert "Invalid agent" in detail
@@ -154,50 +151,42 @@ def test_create_session_with_invalid_agent_fails(mock_config_pi_first):
 
 
 def test_create_session_with_pi_agent(mock_config_pi_first, test_sessions_dir):
-    """POST /sessions/{id}?agent=pi-agent should work when pi-agent
-    is in agent_by_alias."""
-    session_id = "test_create_pi_agent"
-
+    """POST /sessions?agent=pi-agent should work."""
     with TestClient(app) as c:
-        response = c.post(f"/sessions/{session_id}?agent=pi-agent")
+        response = c.post("/sessions?agent=pi-agent")
         assert response.status_code == 200
-        assert response.json()["status"] == "created"
+        session_id = response.json()["session_id"]
 
-    session_path = test_sessions_dir + "/" + session_id
-    agent_file = session_path + "/.agent_type"
+    session_path = os.path.join(test_sessions_dir, session_id)
+    agent_file = os.path.join(session_path, ".agent_type")
     assert os.path.exists(agent_file)
-    with open(agent_file, "r") as f:
+    with open(agent_file) as f:
         assert f.read().strip() == "pi-agent"
 
 
 def test_create_session_without_agent_no_agent_type(
     mock_config_pi_first, test_sessions_dir
 ):
-    """POST /sessions/{id} without agent param should NOT create .agent_type."""
-    session_id = "test_create_no_agent"
-
+    """POST /sessions without agent param should NOT create .agent_type."""
     with TestClient(app) as c:
-        response = c.post(f"/sessions/{session_id}")
+        response = c.post("/sessions")
         assert response.status_code == 200
+        session_id = response.json()["session_id"]
 
-    session_path = test_sessions_dir + "/" + session_id
-    agent_file = session_path + "/.agent_type"
+    session_path = os.path.join(test_sessions_dir, session_id)
+    agent_file = os.path.join(session_path, ".agent_type")
     assert not os.path.exists(agent_file)
 
 
-def test_create_session_with_first_agent_in_alias(
-    mock_config_pi_first, test_sessions_dir
-):
-    """POST /sessions/{id}?agent=pi-agent (first in agent_by_alias)
-    should succeed and write .agent_type."""
-    session_id = "test_create_first_agent"
-
+def test_new_session_returns_unique_ids(mock_config_pi_first, test_sessions_dir):
+    """POST /sessions twice should return different session IDs."""
     with TestClient(app) as c:
-        response = c.post(f"/sessions/{session_id}?agent=pi-agent")
-        assert response.status_code == 200
+        id1 = c.post("/sessions").json()["session_id"]
+        id2 = c.post("/sessions").json()["session_id"]
+    assert id1 != id2
+    assert id1.startswith("session_")
+    assert id2.startswith("session_")
 
-    session_path = test_sessions_dir + "/" + session_id
-    agent_file = session_path + "/.agent_type"
-    assert os.path.exists(agent_file)
-    with open(agent_file, "r") as f:
-        assert f.read().strip() == "pi-agent"
+    # Both should exist on disk
+    assert os.path.isdir(os.path.join(test_sessions_dir, id1))
+    assert os.path.isdir(os.path.join(test_sessions_dir, id2))
