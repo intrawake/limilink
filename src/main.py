@@ -395,7 +395,8 @@ async def process_chat(session_id: str, message: str) -> str:
             parts = message.split(maxsplit=1)
             agent_path = os.path.join(session_path, ".agent_type")
             if len(parts) == 1:
-                current_agent_str = "gemini-cli"
+                # Default to the first agent defined in the config
+                current_agent_str = list(agent_by_alias.keys())[0]
                 if os.path.exists(agent_path):
                     with open(agent_path, "r") as f:
                         current_agent_str = f.read().strip()

@@ -195,8 +195,17 @@ async def test_model_switching_with_existing_model_arg(mock_exec, mock_load_conf
 
 
 @pytest.mark.asyncio
+@patch("main.load_config")
 @patch("main.asyncio.create_subprocess_exec")
-async def test_resume_flag_injection(mock_exec):
+async def test_resume_flag_injection(mock_exec, mock_load_config):
+    # Setup mock config with gemini-cli as the agent (--resume is gemini-cli-specific)
+    mock_load_config.return_value = (
+        {
+            "agent_by_alias": {"gemini-cli": {"harness": "gemini-cli"}},
+        },
+        "/test/config/dir",
+    )
+
     # Setup mock subprocess
     mock_process = AsyncMock()
     mock_process.returncode = 0
