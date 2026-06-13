@@ -439,3 +439,69 @@ async def test_env_command(mock_exec):
         mock_exec.assert_called_once()
         env = mock_exec.call_args[1]["env"]
         assert env.get("SOME_TEST_VAR") == "test_value_123"
+
+
+def test_index_page_served():
+    """The web UI is served at /."""
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "text/html" in response.headers.get("content-type", "")
+    assert "Limilink Proxy" in response.text
+
+
+def test_ui_session_create_flow():
+    """Test the exact flow the browser JS performs: list → POST /sessions → use session_id."""
+    # 1. List sessions (initially empty)
+    response = client.get("/sessions")
+    assert response.status_code == 200
+    initial_sessions = response.json()["sessions"]
+
+    # 2. Create a new session via POST /sessions (no session_id in URL)
+    response = client.post("/sessions")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "created"
+    session_id = data["session_id"]
+    assert session_id.startswith("session_")
+
+    # 3. Verify it shows up in the session list
+    response = client.get("/sessions")
+    assert response.status_code == 200
+    assert session_id in response.json()["sessions"]
+
+    # 4. Create another session; both should be listed
+    response = client.post("/sessions")
+    assert response.status_code == 200
+    session_id2 = response.json()["session_id"]
+    assert session_id2 != session_id
+
+    response = client.get("/sessions")
+    sessions = response.json()["sessions"]
+    assert session_id in sessions
+    assert session_id2 in sessions
+    assert len(sessions) == len(initial_sessions) + 2
+
+
+def test_old_buggy_url_returns_error():
+    """POST /sessions/<name> has no handler — the frontend must use POST /sessions.
+    This guards against regressing to the old bug where the UI POSTed to a
+    timestamp-based URL that the server didn't recognize."""
+    response = client.post("/sessions/session_20250613_120000")
+    assert (
+        response.status_code == 405
+    )  # Method Not Allowed (no POST route for this path)
+
+
+def test_html_uses_correct_create_endpoint():
+    """The frontend HTML must use POST /sessions (not /sessions/<name>)."""
+    response = client.get("/")
+    html = response.text
+    # Should contain the correct endpoint (used in both the + button and auto-create)
+    assert html.count("fetch('/sessions', { method: 'POST' })") >= 2
+    # Should NOT use string concatenation with POST to create sessions
+    # (The old bug: fetch('/sessions/' + name, { method: 'POST' }))
+    post_lines = [line for line in html.split("\n") if "method: 'POST'" in line]
+    for line in post_lines:
+        assert "'/sessions/' +" not in line, (
+            f"old buggy POST pattern found: {line.strip()}"
+        )

@@ -226,9 +226,9 @@
                 const data = await res.json();
                 sessionSelect.innerHTML = '';
                 if (data.sessions.length === 0) {
-                    const newName = generateSessionName();
-                    await fetch('/sessions/' + newName, { method: 'POST' });
-                    data.sessions = [newName];
+                    const createRes = await fetch('/sessions', { method: 'POST' });
+                    const createData = await createRes.json();
+                    data.sessions = [createData.session_id];
                 }
                 data.sessions.forEach(s => {
                     const opt = document.createElement('option');
@@ -254,9 +254,9 @@
         }
 
         newSessionBtn.addEventListener('click', async () => {
-            const name = generateSessionName();
-            await fetch('/sessions/' + name, { method: 'POST' });
-            currentSession = name;
+            const createRes = await fetch('/sessions', { method: 'POST' });
+            const createData = await createRes.json();
+            currentSession = createData.session_id;
             localStorage.setItem('limilink_last_session', currentSession);
             await fetchSessions();
         });
