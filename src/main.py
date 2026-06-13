@@ -113,6 +113,11 @@ def get_sessions_dir(cfg: dict[Any, Any], config_dir: str) -> str:
     return os.path.join(os.path.dirname(__file__), "..", "session")
 
 
+def get_session_tmp_dir(session_path: str) -> str:
+    """Return the per-session tmp directory path."""
+    return os.path.join(session_path, "tmp")
+
+
 def enqueue_unread_message(session_path: str, message: str):
     unread_path = os.path.join(session_path, "unread.json")
     try:
@@ -251,6 +256,10 @@ async def delete_session(session_id: str):
     if os.path.exists(session_path) and os.path.isdir(session_path):
         try:
             shutil.rmtree(session_path)
+            # Also clean up the per-session tmp dir
+            session_tmp = get_session_tmp_dir(session_path)
+            if os.path.isdir(session_tmp):
+                shutil.rmtree(session_tmp, ignore_errors=True)
             return {"status": "deleted", "session_id": safe_id}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -351,6 +360,10 @@ async def process_chat(session_id: str, message: str) -> str:
         # Create an isolated project directory for this session
         session_path = os.path.join(sessions_dir, safe_session_id)
         os.makedirs(session_path, exist_ok=True)
+
+        # Per-session tmp directory so pi/gemini-cli temp files are isolated
+        session_tmp = get_session_tmp_dir(session_path)
+        os.makedirs(session_tmp, exist_ok=True)
 
         # Ensure session initialized
         ensure_session_initialized(session_path, cfg, config_dir)
@@ -576,6 +589,7 @@ async def process_chat(session_id: str, message: str) -> str:
 
         env = os.environ.copy()
         env["LIMILINK_SESSION"] = safe_session_id
+        env["TMPDIR"] = get_session_tmp_dir(session_path)
 
         if harness == HarnessType.PI:
             pi_base_url = preset.get("openai_base_url") or cfg.get(
@@ -745,6 +759,20 @@ async def process_chat(session_id: str, message: str) -> str:
                 finally:
                     if running_processes.get(safe_session_id) == process:
                         del running_processes[safe_session_id]
+                    # Clean up session tmp files after each request
+                    session_tmp = get_session_tmp_dir(session_path)
+                    if os.path.isdir(session_tmp):
+                        for entry in os.listdir(session_tmp):
+                            entry_path = os.path.join(session_tmp, entry)
+                            try:
+                                if os.path.isfile(entry_path) or os.path.islink(
+                                    entry_path
+                                ):
+                                    os.unlink(entry_path)
+                                elif os.path.isdir(entry_path):
+                                    shutil.rmtree(entry_path)
+                            except OSError:
+                                pass
 
                 retcode = process.returncode
                 if retcode is None or retcode == 0:

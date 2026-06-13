@@ -299,6 +299,74 @@ async def test_env_vars_injection(mock_exec, mock_load_config):
 
 
 @pytest.mark.asyncio
+@patch("main.asyncio.create_subprocess_exec")
+async def test_tmpdir_isolation_and_cleanup(mock_exec, test_sessions_dir):
+    """TMPDIR is set to a per-session tmp/ dir and cleaned up after each request.
+
+    Verifies the isolation story: pi/gemini-cli temp files go into
+    <session>/tmp/ instead of polluting the system /tmp, and that directory
+    is wiped after every chat request completes.
+    """
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"ok", b"")
+    mock_exec.return_value = mock_process
+
+    session_id = "test_tmpdir_session"
+    session_path = os.path.join(test_sessions_dir, session_id)
+    expected_tmpdir = os.path.join(session_path, "tmp")
+
+    with TestClient(app) as c:
+        response = c.post("/chat", json={"message": "hello", "session_id": session_id})
+        assert response.status_code == 200
+
+    # TMPDIR was injected into the subprocess env
+    mock_exec.assert_called_once()
+    env = mock_exec.call_args[1]["env"]
+    assert env["TMPDIR"] == expected_tmpdir
+
+    # tmp dir was created before the subprocess ran
+    assert os.path.isdir(expected_tmpdir)
+
+    # After the request completed, the tmp dir should be empty (but still exist)
+    assert os.path.isdir(expected_tmpdir)
+    assert os.listdir(expected_tmpdir) == []
+
+
+@pytest.mark.asyncio
+@patch("main.asyncio.create_subprocess_exec")
+async def test_session_delete_cleans_tmpdir(mock_exec, test_sessions_dir):
+    """Deleting a session removes its tmp/ directory."""
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"ok", b"")
+    mock_exec.return_value = mock_process
+
+    session_id = "test_delete_tmpdir_session"
+    session_path = os.path.join(test_sessions_dir, session_id)
+    expected_tmpdir = os.path.join(session_path, "tmp")
+
+    with TestClient(app) as c:
+        # Create and use the session so tmp/ gets created
+        c.post("/sessions")
+        c.post("/chat", json={"message": "hello", "session_id": session_id})
+
+        # Create a dummy file in tmp/ to simulate a leaked temp file
+        dummy_file = os.path.join(expected_tmpdir, "leaked.log")
+        with open(dummy_file, "w") as f:
+            f.write("should be cleaned up")
+        assert os.path.exists(dummy_file)
+
+        # Delete the session
+        resp = c.delete(f"/sessions/{session_id}")
+        assert resp.status_code == 200
+
+    # Session dir and tmp dir are gone
+    assert not os.path.exists(session_path)
+    assert not os.path.exists(expected_tmpdir)
+
+
+@pytest.mark.asyncio
 @patch("main.load_config")
 @patch("main.asyncio.create_subprocess_exec")
 async def test_env_vars_dict_only(mock_exec, mock_load_config):

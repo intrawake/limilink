@@ -2,6 +2,7 @@ import argparse
 import uvicorn
 import sys
 import os
+import shutil
 import atexit
 import signal
 import logging
@@ -61,6 +62,14 @@ def main():
     def cleanup():
         if os.path.exists(pid_file):
             os.remove(pid_file)
+        # Wipe all per-session tmp directories
+        from main import get_session_tmp_dir
+
+        if os.path.isdir(sessions_dir):
+            for entry in os.listdir(sessions_dir):
+                session_tmp = get_session_tmp_dir(os.path.join(sessions_dir, entry))
+                if os.path.isdir(session_tmp):
+                    shutil.rmtree(session_tmp, ignore_errors=True)
 
     atexit.register(cleanup)
 
