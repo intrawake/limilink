@@ -325,6 +325,8 @@ def write_pi_models_json(
     pi_api_key = preset.get("openai_api_key") or cfg.get("pi_agent_openai_api_key")
     if not pi_api_key:
         return
+    token_ctx_limit = int(preset.get("token_ctx_limit", 128000))
+    token_gen_limit = int(preset.get("token_gen_limit", 16384))
     models_config = {
         "providers": {
             PI_PROVIDER_NAME: {
@@ -336,8 +338,8 @@ def write_pi_models_json(
                     {
                         "id": model,
                         "name": model,
-                        "contextWindow": 128000,
-                        "maxTokens": 16384,
+                        "contextWindow": token_ctx_limit,
+                        "maxTokens": token_gen_limit,
                         "input": ["text"],
                     }
                 ],

@@ -190,3 +190,111 @@ def test_new_session_returns_unique_ids(mock_config_pi_first, test_sessions_dir)
     # Both should exist on disk
     assert os.path.isdir(os.path.join(test_sessions_dir, id1))
     assert os.path.isdir(os.path.join(test_sessions_dir, id2))
+
+
+@pytest.fixture
+def mock_config_pi_with_token_limits():
+    """Config where pi-agent preset has custom token_ctx_limit and token_gen_limit."""
+    with patch("main.load_config") as mock:
+        mock.return_value = (
+            {
+                "agent_by_alias": {
+                    "pi-big": {
+                        "harness": "pi",
+                        "model": "big-model",
+                        "token_ctx_limit": 200000,
+                        "token_gen_limit": 8192,
+                    },
+                },
+                "pi_agent_openai_base_url": "http://test-host:11435/v1",
+                "pi_agent_openai_api_key": "test-sk-key",
+            },
+            "/test/config/dir",
+        )
+        yield mock
+
+
+@pytest.fixture
+def mock_config_pi_default_limits():
+    """Config where pi-agent preset has no token limits set (should use defaults)."""
+    with patch("main.load_config") as mock:
+        mock.return_value = (
+            {
+                "agent_by_alias": {
+                    "pi-default": {
+                        "harness": "pi",
+                        "model": "auto",
+                    },
+                },
+                "pi_agent_openai_base_url": "http://test-host:11435/v1",
+                "pi_agent_openai_api_key": "test-sk-key",
+            },
+            "/test/config/dir",
+        )
+        yield mock
+
+
+@pytest.mark.asyncio
+@patch("main.asyncio.create_subprocess_exec")
+async def test_models_json_uses_custom_token_limits(
+    mock_exec, mock_config_pi_with_token_limits, test_sessions_dir
+):
+    """models.json should use per-agent token_ctx_limit and token_gen_limit."""
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"ok", b"")
+    mock_exec.return_value = mock_process
+
+    import json
+
+    with TestClient(app) as c:
+        create_resp = c.post("/sessions?agent=pi-big")
+        assert create_resp.status_code == 200
+        session_id = create_resp.json()["session_id"]
+
+        # Trigger chat to generate models.json
+        response = c.post("/chat", json={"message": "hello", "session_id": session_id})
+        assert response.status_code == 200
+
+    # Verify models.json has custom limits
+    session_path = os.path.join(test_sessions_dir, session_id)
+    models_path = os.path.join(session_path, "models.json")
+    assert os.path.exists(models_path)
+    with open(models_path) as f:
+        models = json.load(f)
+    provider = models["providers"]["default-provider"]
+    model = provider["models"][0]
+    assert model["contextWindow"] == 200000
+    assert model["maxTokens"] == 8192
+
+
+@pytest.mark.asyncio
+@patch("main.asyncio.create_subprocess_exec")
+async def test_models_json_uses_default_token_limits(
+    mock_exec, mock_config_pi_default_limits, test_sessions_dir
+):
+    """models.json should default to 128000/16384 when token limits aren't configured."""
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"ok", b"")
+    mock_exec.return_value = mock_process
+
+    import json
+
+    with TestClient(app) as c:
+        create_resp = c.post("/sessions?agent=pi-default")
+        assert create_resp.status_code == 200
+        session_id = create_resp.json()["session_id"]
+
+        response = c.post("/chat", json={"message": "hello", "session_id": session_id})
+        assert response.status_code == 200
+
+    session_path = os.path.join(test_sessions_dir, session_id)
+    models_path = os.path.join(session_path, "models.json")
+    assert os.path.exists(models_path)
+    with open(models_path) as f:
+        models = json.load(f)
+    provider = models["providers"]["default-provider"]
+    model = provider["models"][0]
+    assert model["contextWindow"] == 128000
+    assert model["maxTokens"] == 16384
