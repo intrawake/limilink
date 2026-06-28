@@ -7,6 +7,7 @@ import asyncio
 import json
 import signal
 import logging
+import time
 import uuid
 from typing import Any
 from enum import Enum
@@ -544,6 +545,76 @@ async def process_chat(session_id: str, message: str) -> str:
             with open(env_overrides_path, "w") as f:
                 json.dump(env_overrides, f)
             reply = f"Environment variable {var_name} set to: {var_value}"
+            append_to_history(session_path, "bot", reply)
+            return reply
+
+        # Handle garbage collection command
+        if message.startswith("!gc"):
+            append_to_history(session_path, "user", message)
+            parts = message.split(maxsplit=2)
+            if len(parts) < 3:
+                reply = "Usage: !gc day <N>  (delete sessions inactive for N days)"
+                append_to_history(session_path, "bot", reply)
+                return reply
+            unit = parts[1]
+            if unit != "day":
+                reply = f"Unsupported unit '{unit}'. Only 'day' is supported. Usage: !gc day <N>"
+                append_to_history(session_path, "bot", reply)
+                return reply
+            try:
+                n_days = int(parts[2])
+                if n_days < 0:
+                    reply = "Number of days must be >= 0."
+                    append_to_history(session_path, "bot", reply)
+                    return reply
+            except ValueError:
+                reply = f"Invalid number '{parts[2]}'. Usage: !gc day <N>"
+                append_to_history(session_path, "bot", reply)
+                return reply
+
+            cutoff = time.time() - (n_days * 86400)
+            deleted = []
+            skipped_active = []
+            for entry in os.listdir(sessions_dir):
+                entry_path = os.path.join(sessions_dir, entry)
+                if not os.path.isdir(entry_path):
+                    continue
+                # Skip sessions with active running processes
+                if entry in running_processes:
+                    skipped_active.append(entry)
+                    continue
+                # Use chat_history.json mtime as the last-activity timestamp
+                history_file = get_history_path(entry_path)
+                if os.path.exists(history_file):
+                    last_activity = os.path.getmtime(history_file)
+                else:
+                    last_activity = os.path.getmtime(entry_path)
+                if last_activity < cutoff:
+                    try:
+                        shutil.rmtree(entry_path)
+                        session_tmp = get_session_tmp_dir(entry_path)
+                        if os.path.isdir(session_tmp):
+                            shutil.rmtree(session_tmp, ignore_errors=True)
+                        deleted.append(entry)
+                    except Exception as e:
+                        reply = f"Failed to delete session '{entry}': {e}"
+                        append_to_history(session_path, "bot", reply)
+                        return reply
+
+            lines = []
+            if deleted:
+                lines.append(
+                    f"🧹 Deleted {len(deleted)} stale session(s) (inactive > {n_days} day(s)):"
+                )
+                for sid in deleted:
+                    lines.append(f"  - `{sid}`")
+            else:
+                lines.append(f"No stale sessions found (inactive > {n_days} day(s)).")
+            if skipped_active:
+                lines.append(
+                    f"Skipped {len(skipped_active)} active session(s): {', '.join(f'`{s}`' for s in skipped_active)}"
+                )
+            reply = "\n".join(lines)
             append_to_history(session_path, "bot", reply)
             return reply
 
