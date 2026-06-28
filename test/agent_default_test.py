@@ -258,7 +258,7 @@ async def test_models_json_uses_custom_token_limits(
 
     # Verify models.json has custom limits
     session_path = os.path.join(test_sessions_dir, session_id)
-    models_path = os.path.join(session_path, "models.json")
+    models_path = os.path.join(session_path, ".pi", "agent", "models.json")
     assert os.path.exists(models_path)
     with open(models_path) as f:
         models = json.load(f)
@@ -290,7 +290,7 @@ async def test_models_json_uses_default_token_limits(
         assert response.status_code == 200
 
     session_path = os.path.join(test_sessions_dir, session_id)
-    models_path = os.path.join(session_path, "models.json")
+    models_path = os.path.join(session_path, ".pi", "agent", "models.json")
     assert os.path.exists(models_path)
     with open(models_path) as f:
         models = json.load(f)

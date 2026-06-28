@@ -193,7 +193,10 @@ def ensure_session_initialized(session_path: str, cfg: dict[Any, Any], config_di
     # 4. Create an outbox directory for file sending
     os.makedirs(os.path.join(session_path, "outbox"), exist_ok=True)
 
-    # 5. Mark as initialized
+    # 5. Create pi agent directories for models.json, auth.json, and settings
+    os.makedirs(os.path.join(session_path, ".pi", "agent"), exist_ok=True)
+
+    # 6. Mark as initialized
     with open(init_marker, "a"):
         pass
 
@@ -346,7 +349,8 @@ def write_pi_models_json(
             }
         }
     }
-    models_json_path = os.path.join(session_path, "models.json")
+    models_json_path = os.path.join(session_path, ".pi", "agent", "models.json")
+    os.makedirs(os.path.dirname(models_json_path), exist_ok=True)
     with open(models_json_path, "w") as f:
         json.dump(models_config, f, indent=2)
 
@@ -569,7 +573,9 @@ async def process_chat(session_id: str, message: str) -> str:
             )
             try:
                 stat_env = os.environ.copy()
-                stat_env["PI_CODING_AGENT_DIR"] = session_path
+                stat_env["PI_CODING_AGENT_DIR"] = os.path.join(
+                    session_path, ".pi", "agent"
+                )
                 stat_result = await asyncio.create_subprocess_exec(
                     "python3",
                     stat_script,
@@ -612,14 +618,15 @@ async def process_chat(session_id: str, message: str) -> str:
 
             # Write models.json only if it doesn't exist yet (first run).
             # Subsequent changes go through !agent / !model which rewrite it.
-            models_json_path = os.path.join(session_path, "models.json")
+            pi_agent_dir = os.path.join(session_path, ".pi", "agent")
+            models_json_path = os.path.join(pi_agent_dir, "models.json")
             if not os.path.exists(models_json_path):
                 write_pi_models_json(session_path, preset, cfg, current_model)
 
             exepath = cfg.get("pi_agent_exepath", "pi-agent")
 
             # pi-agent env vars
-            env["PI_CODING_AGENT_DIR"] = session_path
+            env["PI_CODING_AGENT_DIR"] = pi_agent_dir
 
             # Build pi-agent args
             agent_args = []
