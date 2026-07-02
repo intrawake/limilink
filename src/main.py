@@ -42,6 +42,9 @@ class HarnessType(str, Enum):
 # Global tracker for running Gemini CLI processes (session_id -> process)
 running_processes: dict[str, asyncio.subprocess.Process] = {}
 session_locks: dict[str, asyncio.Lock] = {}
+# Session-scoped reasoning effort overrides (set via !reasoning_effort).
+# Persisted only to settings.json for pi-agent, not read back by us.
+session_reasoning_effort: dict[str, str] = {}
 
 
 def get_session_lock(session_id: str) -> asyncio.Lock:
@@ -334,6 +337,30 @@ async def get_session_history(session_id: str):
 
 PI_PROVIDER_NAME = "default-provider"
 
+VALID_REASONING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"]
+
+
+def write_pi_settings_json(
+    session_path: str,
+    preset: dict[Any, Any],
+):
+    """Write settings.json for a pi-agent session with reasoning level.
+
+    Only writes if settings.json doesn't exist yet, so !reasoning_effort
+    changes within a session aren't overwritten.
+    """
+    reasoning_effort = preset.get("reasoning_effort")
+    if not reasoning_effort:
+        return
+
+    settings_path = os.path.join(session_path, ".pi", "agent", "settings.json")
+    if os.path.exists(settings_path):
+        return
+
+    os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+    with open(settings_path, "w") as f:
+        json.dump({"defaultThinkingLevel": reasoning_effort}, f, indent=2)
+
 
 def write_pi_models_json(
     session_path: str,
@@ -436,6 +463,13 @@ async def process_chat(session_id: str, message: str) -> str:
             else:
                 current_model = "auto"
 
+        # Determine reasoning effort for this session.
+        # Session override (from !reasoning_effort) takes precedence over preset.
+        # No harness file reads — we track it in memory.
+        current_reasoning_effort = session_reasoning_effort.get(safe_session_id)
+        if current_reasoning_effort is None:
+            current_reasoning_effort = preset.get("reasoning_effort")
+
         # Handle stop command
         if message.strip() == "!stop":
             append_to_history(session_path, "user", message)
@@ -511,6 +545,47 @@ async def process_chat(session_id: str, message: str) -> str:
                 write_pi_models_json(session_path, preset, cfg, new_model)
 
             reply = f"Model switched to: {new_model}"
+            append_to_history(session_path, "bot", reply)
+            return reply
+
+        # Handle reasoning effort command (pi harness only)
+        if message.startswith("!reasoning_effort"):
+            append_to_history(session_path, "user", message)
+            if harness != HarnessType.PI:
+                reply = "!reasoning_effort is only available for the pi harness."
+                append_to_history(session_path, "bot", reply)
+                return reply
+
+            parts = message.split(maxsplit=1)
+
+            if len(parts) == 1:
+                reply = f"Current reasoning level: {current_reasoning_effort or 'not set (using provider default)'}"
+                append_to_history(session_path, "bot", reply)
+                return reply
+
+            level = parts[1].strip()
+            if level not in VALID_REASONING_LEVELS:
+                reply = f"Invalid reasoning level: {level}. Valid: {', '.join(VALID_REASONING_LEVELS)}"
+                append_to_history(session_path, "bot", reply)
+                return reply
+
+            # Update in-memory and write settings.json for pi-agent.
+            session_reasoning_effort[safe_session_id] = level
+            current_reasoning_effort = level
+            settings_path = os.path.join(session_path, ".pi", "agent", "settings.json")
+            settings = {}
+            if os.path.exists(settings_path):
+                try:
+                    with open(settings_path, "r") as f:
+                        settings = json.load(f)
+                except Exception:
+                    pass
+            settings["defaultThinkingLevel"] = level
+            os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+            with open(settings_path, "w") as f:
+                json.dump(settings, f, indent=2)
+
+            reply = f"Reasoning level set to: {level}"
             append_to_history(session_path, "bot", reply)
             return reply
 
@@ -695,11 +770,12 @@ async def process_chat(session_id: str, message: str) -> str:
         if harness == HarnessType.PI:
             pi_agent_dir = os.path.join(session_path, ".pi", "agent")
 
-            # Write models.json only if it doesn't exist yet (first run).
-            # Subsequent changes go through !agent / !model which rewrite it.
+            # Write models.json and settings.json only if they don't exist yet (first run).
+            # Subsequent changes go through !agent / !model / !reasoning_effort which rewrite them.
             models_json_path = os.path.join(pi_agent_dir, "models.json")
             if not os.path.exists(models_json_path):
                 write_pi_models_json(session_path, preset, cfg, current_model)
+            write_pi_settings_json(session_path, preset)
 
             exepath = cfg.get("pi_agent_exepath", "pi-agent")
 
