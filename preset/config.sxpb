@@ -2,6 +2,9 @@
  (gemini-cli
   (harness gemini-cli)
   (model auto)
+  (session_symlink_dict ()
+   (agent_specific_link.txt ./agent_specific_target.txt)
+  )
  )
 )
 (gemini_exepath gemini)
@@ -10,7 +13,7 @@
 )
 (gemini_system_md gemini_cli/SYSTEM.md)
 (gemini_workspace_md gemini_cli/GEMINI.md)
-(workspace_symlink_by_basename ()
+(session_symlink_dict ()
  (test_target.txt ./test_target.txt)
  (dreamscape ~/dreamscape)
  (SOUL.md ~/dreamscape/paprika_cwd/SOUL.md)

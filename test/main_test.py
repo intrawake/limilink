@@ -111,6 +111,32 @@ def test_create_session_initialization(test_sessions_dir):
             assert f.read().strip() == "This is a test target"
 
 
+def test_create_session_with_agent_symlinks(test_sessions_dir):
+    """Creating a session with an agent applies both global and agent-specific
+    session_symlink_dict entries."""
+    preset_config_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "preset", "config.sxpb")
+    )
+    with patch.dict(os.environ, {"LIMILINK_CONFIG": preset_config_path}):
+        response = client.post("/sessions?agent=gemini-cli")
+        assert response.status_code == 200
+        session_id = response.json()["session_id"]
+
+        session_path = os.path.join(test_sessions_dir, session_id)
+
+        # Global symlinks present
+        global_link = os.path.join(session_path, "test_target.txt")
+        assert os.path.islink(global_link)
+        assert os.path.exists(global_link)
+
+        # Agent-specific symlink present
+        agent_link = os.path.join(session_path, "agent_specific_link.txt")
+        assert os.path.islink(agent_link)
+        assert os.path.exists(agent_link)
+        with open(agent_link, "r") as f:
+            assert f.read().strip() == "This is an agent-specific test target"
+
+
 @pytest.mark.asyncio
 @patch("main.asyncio.create_subprocess_exec")
 async def test_model_switching(mock_exec):
@@ -232,6 +258,44 @@ async def test_resume_flag_injection(mock_exec, mock_load_config):
     assert "--resume" in called_args
     idx = list(called_args).index("--resume")
     assert called_args[idx + 1] == "latest"
+
+
+@pytest.mark.asyncio
+@patch("main.load_config")
+@patch("main.asyncio.create_subprocess_exec")
+async def test_pi_harness_passes_approve(mock_exec, mock_load_config):
+    """Pi sessions should use the configured provider and trust generated .pi resources."""
+    mock_load_config.return_value = (
+        {
+            "agent_by_alias": {
+                "pi-gpt": {
+                    "harness": "pi",
+                    "provider": "openai-codex",
+                    "model": "gpt-5.5",
+                }
+            },
+            "pi_agent_exepath": "pi-agent",
+        },
+        "/test/config/dir",
+    )
+
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"mocked response", b"")
+    mock_exec.return_value = mock_process
+
+    with TestClient(app) as c:
+        response = c.post(
+            "/chat", json={"message": "hello", "session_id": "test_pi_approve_session"}
+        )
+
+    assert response.status_code == 200
+    mock_exec.assert_called_once()
+    called_args = mock_exec.call_args[0]
+    assert called_args[0] == "pi-agent"
+    assert "--approve" in called_args
+    provider_idx = list(called_args).index("--provider")
+    assert called_args[provider_idx + 1] == "openai-codex"
 
 
 @pytest.mark.asyncio

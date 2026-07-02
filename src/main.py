@@ -147,7 +147,38 @@ def dequeue_unread_messages(session_path: str) -> list[str]:
     return []
 
 
-def ensure_session_initialized(session_path: str, cfg: dict[Any, Any], config_dir: str):
+def resolve_config_path(path: str, config_dir: str) -> str:
+    expanded = os.path.expanduser(path)
+    if os.path.isabs(expanded):
+        return expanded
+    return os.path.normpath(os.path.join(config_dir, expanded))
+
+
+def get_session_symlink_dict(
+    cfg: dict[Any, Any], agent_alias: str | None = None
+) -> dict[str, str]:
+    symlinks = cfg.get("session_symlink_dict", {})
+    if not isinstance(symlinks, dict):
+        symlinks = {}
+
+    if not agent_alias:
+        return dict(symlinks)
+
+    agent_by_alias = cfg.get("agent_by_alias", {})
+    agent_preset = agent_by_alias.get(agent_alias, {})
+    agent_symlinks = agent_preset.get("session_symlink_dict", {})
+    if not isinstance(agent_symlinks, dict):
+        return dict(symlinks)
+
+    return {**symlinks, **agent_symlinks}
+
+
+def ensure_session_initialized(
+    session_path: str,
+    cfg: dict[Any, Any],
+    config_dir: str,
+    agent_alias: str | None = None,
+):
     # Marker to avoid re-initialization
     init_marker = os.path.join(session_path, ".initialized")
     if os.path.exists(init_marker):
@@ -162,34 +193,22 @@ def ensure_session_initialized(session_path: str, cfg: dict[Any, Any], config_di
     # 2. Copy workspace GEMINI.md if configured
     workspace_md_rel = cfg.get("gemini_workspace_md")
     if workspace_md_rel:
-        workspace_md_rel = os.path.expanduser(workspace_md_rel)
-        workspace_md_abs = (
-            workspace_md_rel
-            if os.path.isabs(workspace_md_rel)
-            else os.path.normpath(os.path.join(config_dir, workspace_md_rel))
-        )
+        workspace_md_abs = resolve_config_path(workspace_md_rel, config_dir)
         if os.path.exists(workspace_md_abs):
             target_md = os.path.join(session_path, "GEMINI.md")
             if not os.path.exists(target_md):
                 shutil.copy2(workspace_md_abs, target_md)
 
-    # 4. Create symlinks if configured
-    symlinks = cfg.get("workspace_symlink_by_basename", {})
-    if isinstance(symlinks, dict):
-        for basename, target in symlinks.items():
-            target_expanded = os.path.expanduser(target)
-            target_abs = (
-                target_expanded
-                if os.path.isabs(target_expanded)
-                else os.path.normpath(os.path.join(config_dir, target_expanded))
-            )
-            link_path = os.path.join(session_path, basename)
-            if not os.path.exists(link_path) and not os.path.islink(link_path):
-                try:
-                    os.makedirs(os.path.dirname(link_path), exist_ok=True)
-                    os.symlink(target_abs, link_path)
-                except Exception as e:
-                    print(f"Failed to create symlink {link_path} -> {target_abs}: {e}")
+    # 3. Create symlinks if configured. Agent-specific entries override globals.
+    for relpath, target in get_session_symlink_dict(cfg, agent_alias).items():
+        target_abs = resolve_config_path(target, config_dir)
+        link_path = os.path.join(session_path, relpath)
+        if not os.path.exists(link_path) and not os.path.islink(link_path):
+            try:
+                os.makedirs(os.path.dirname(link_path), exist_ok=True)
+                os.symlink(target_abs, link_path)
+            except Exception as e:
+                print(f"Failed to create symlink {link_path} -> {target_abs}: {e}")
 
     # 4. Create an outbox directory for file sending
     os.makedirs(os.path.join(session_path, "outbox"), exist_ok=True)
@@ -240,7 +259,7 @@ async def create_session(agent: str | None = None):
     session_path = os.path.join(sessions_dir, safe_id)
     os.makedirs(session_path, exist_ok=True)
 
-    ensure_session_initialized(session_path, cfg, config_dir)
+    ensure_session_initialized(session_path, cfg, config_dir, agent_alias=agent)
 
     # Write .agent_type if an agent was specified
     if agent is not None:
@@ -331,9 +350,10 @@ def write_pi_models_json(
         return
     token_ctx_limit = int(preset.get("token_ctx_limit", 128000))
     token_gen_limit = int(preset.get("token_gen_limit", 16384))
+    provider_name = preset.get("provider", PI_PROVIDER_NAME)
     models_config = {
         "providers": {
-            PI_PROVIDER_NAME: {
+            provider_name: {
                 "baseUrl": pi_base_url,
                 "apiKey": pi_api_key,
                 "api": preset.get("provider_api")
@@ -372,10 +392,7 @@ async def process_chat(session_id: str, message: str) -> str:
         session_tmp = get_session_tmp_dir(session_path)
         os.makedirs(session_tmp, exist_ok=True)
 
-        # Ensure session initialized
-        ensure_session_initialized(session_path, cfg, config_dir)
-
-        # Determine agent alias for this session
+        # Determine agent alias for this session (read before init so agent-specific symlinks are applied)
         agent_by_alias = cfg.get("agent_by_alias", {})
         if not agent_by_alias:
             raise RuntimeError("Missing 'agent_by_alias' in config.sxpb")
@@ -387,6 +404,11 @@ async def process_chat(session_id: str, message: str) -> str:
         else:
             # Default to the first agent defined in the config
             agent_alias = list(agent_by_alias.keys())[0]
+
+        # Ensure session initialized (with agent-specific symlinks if known)
+        ensure_session_initialized(
+            session_path, cfg, config_dir, agent_alias=agent_alias
+        )
 
         # Resolve preset if it exists
         preset = agent_by_alias.get(agent_alias, {})
@@ -671,25 +693,10 @@ async def process_chat(session_id: str, message: str) -> str:
         env["TMPDIR"] = get_session_tmp_dir(session_path)
 
         if harness == HarnessType.PI:
-            pi_base_url = preset.get("openai_base_url") or cfg.get(
-                "pi_agent_openai_base_url"
-            )
-            if not pi_base_url:
-                raise RuntimeError(
-                    "Missing 'pi_agent_openai_base_url' in config.sxpb. Cannot start pi-agent without an LLM endpoint."
-                )
-
-            pi_api_key = preset.get("openai_api_key") or cfg.get(
-                "pi_agent_openai_api_key"
-            )
-            if not pi_api_key:
-                raise RuntimeError(
-                    "Missing 'pi_agent_openai_api_key' in config.sxpb. Cannot start pi-agent without an API key."
-                )
+            pi_agent_dir = os.path.join(session_path, ".pi", "agent")
 
             # Write models.json only if it doesn't exist yet (first run).
             # Subsequent changes go through !agent / !model which rewrite it.
-            pi_agent_dir = os.path.join(session_path, ".pi", "agent")
             models_json_path = os.path.join(pi_agent_dir, "models.json")
             if not os.path.exists(models_json_path):
                 write_pi_models_json(session_path, preset, cfg, current_model)
@@ -700,8 +707,9 @@ async def process_chat(session_id: str, message: str) -> str:
             env["PI_CODING_AGENT_DIR"] = pi_agent_dir
 
             # Build pi-agent args
-            agent_args = []
-            agent_args += ["--provider", PI_PROVIDER_NAME]
+            agent_args = ["--approve"]
+            provider_name = preset.get("provider", PI_PROVIDER_NAME)
+            agent_args += ["--provider", provider_name]
             agent_args += ["--model", current_model]
             agent_args += ["--session-dir", ".pi-agent"]
             # Specification of --session on the first run of a new session directory
