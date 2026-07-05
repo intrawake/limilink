@@ -19,7 +19,7 @@ from pathlib import Path
 def find_session_file():
     agent_dir = os.environ.get("PI_CODING_AGENT_DIR")
     if agent_dir:
-        session_dir = Path(agent_dir) / ".pi-agent"
+        session_dir = Path(agent_dir) / "session"
         if session_dir.is_dir():
             files = sorted(session_dir.glob("*.jsonl"))
             if files:

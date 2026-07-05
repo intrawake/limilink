@@ -390,7 +390,7 @@ async def test_stat_pi_with_data(mock_exec, mock_config, test_sessions_dir):
 
     session_id = "test_stat_pi_data"
     session_path = _os.path.join(test_sessions_dir, session_id)
-    pi_agent_dir = _os.path.join(session_path, ".pi-agent")
+    pi_agent_dir = _os.path.join(session_path, ".pi", "agent", "session")
     _os.makedirs(pi_agent_dir, exist_ok=True)
 
     # Mark session as pi-agent and create dummy jsonl

@@ -723,7 +723,7 @@ async def process_chat(session_id: str, message: str) -> str:
                 append_to_history(session_path, "bot", reply)
                 return reply
 
-            pi_agent_dir = os.path.join(session_path, ".pi-agent")
+            pi_agent_dir = os.path.join(session_path, ".pi", "agent", "session")
             jsonl_files = (
                 sorted([f for f in os.listdir(pi_agent_dir) if f.endswith(".jsonl")])
                 if os.path.isdir(pi_agent_dir)
@@ -787,7 +787,7 @@ async def process_chat(session_id: str, message: str) -> str:
             provider_name = preset.get("provider", PI_PROVIDER_NAME)
             agent_args += ["--provider", provider_name]
             agent_args += ["--model", current_model]
-            agent_args += ["--session-dir", ".pi-agent"]
+            agent_args += ["--session-dir", ".pi/agent/session"]
             # Specification of --session on the first run of a new session directory
             # causes "No session found matching..." error. pi-agent should just
             # use the isolated directory naturally.
