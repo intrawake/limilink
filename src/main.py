@@ -1014,18 +1014,36 @@ async def chat_endpoint(request: ChatRequest):
 
 
 async def run_notifyme_task(session_id: str, message: str):
+    """Deliver a notification and optionally get an agent response.
+
+    The raw notification is enqueued immediately so it always appears
+    without waiting for session locks. Then we try to acquire the session
+    lock with a short timeout — if free, the agent processes the notification
+    and its response arrives as a follow-up message.
+    """
+    safe_id = sanitize_session_id(session_id)
     try:
-        reply_text = await process_chat(session_id, message)
         cfg, config_dir = load_config()
         sessions_dir = get_sessions_dir(cfg, config_dir)
-        session_path = os.path.join(sessions_dir, sanitize_session_id(session_id))
+        session_path = os.path.join(sessions_dir, safe_id)
+        # Always deliver the raw notification immediately.
+        enqueue_unread_message(session_path, message)
+    except Exception as e:
+        logging.error(f"Notifyme enqueue failed for {session_id}: {e}")
+        return
+
+    # Try to get an agent response, but skip if the session is busy.
+    # Don't acquire the lock ourselves — process_chat handles its own locking,
+    # and asyncio.Lock is not reentrant so holding it here would deadlock.
+    lock = get_session_lock(safe_id)
+    if lock.locked():
+        return  # Active chat in progress, raw notification already delivered.
+    try:
+        reply_text = await process_chat(session_id, message)
         enqueue_unread_message(session_path, reply_text)
     except Exception as e:
-        logging.error(f"Notifyme task failed for {session_id}: {e}")
+        logging.error(f"Notifyme agent response failed for {session_id}: {e}")
         try:
-            cfg, config_dir = load_config()
-            sessions_dir = get_sessions_dir(cfg, config_dir)
-            session_path = os.path.join(sessions_dir, sanitize_session_id(session_id))
             error_msg = str(e)
             if isinstance(e, HTTPException):
                 error_msg = f"Error {e.status_code}: {e.detail}"

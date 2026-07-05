@@ -1,6 +1,6 @@
 from __future__ import annotations
 import pytest
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, MagicMock
 from fastapi.testclient import TestClient
 import os
 import shutil
@@ -568,4 +568,94 @@ def test_html_uses_correct_create_endpoint():
     for line in post_lines:
         assert "'/sessions/' +" not in line, (
             f"old buggy POST pattern found: {line.strip()}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_notifyme_task_lock_held_skips_agent(test_sessions_dir):
+    """When session lock is held, raw notification is enqueued but agent is skipped."""
+    from main import run_notifyme_task
+
+    session_id = "session_test_lockheld"
+    session_path = os.path.join(test_sessions_dir, session_id)
+    os.makedirs(session_path, exist_ok=True)
+
+    mock_lock = MagicMock()
+    mock_lock.locked.return_value = True
+
+    with (
+        patch("main.process_chat") as mock_process_chat,
+        patch("main.enqueue_unread_message") as mock_enqueue,
+        patch("main.get_session_lock", return_value=mock_lock),
+    ):
+        await run_notifyme_task(session_id, "background command finished")
+
+        # Raw notification always delivered.
+        mock_enqueue.assert_called_once_with(
+            session_path, "background command finished"
+        )
+        # Agent must NOT be called — lock is held by an active chat.
+        mock_process_chat.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_notifyme_task_lock_free_calls_agent(test_sessions_dir):
+    """When session lock is free, both raw notification and agent response are enqueued."""
+    from main import run_notifyme_task
+
+    session_id = "session_test_lockfree"
+    session_path = os.path.join(test_sessions_dir, session_id)
+    os.makedirs(session_path, exist_ok=True)
+
+    mock_lock = MagicMock()
+    mock_lock.locked.return_value = False
+
+    with (
+        patch("main.process_chat") as mock_process_chat,
+        patch("main.enqueue_unread_message") as mock_enqueue,
+        patch("main.get_session_lock", return_value=mock_lock),
+    ):
+        mock_process_chat.return_value = "looks like it finished successfully"
+
+        await run_notifyme_task(session_id, "background command finished")
+
+        # Raw notification enqueued first.
+        mock_enqueue.assert_any_call(session_path, "background command finished")
+        # Agent called.
+        mock_process_chat.assert_called_once_with(
+            session_id, "background command finished"
+        )
+        # Agent response enqueued second.
+        mock_enqueue.assert_any_call(
+            session_path, "looks like it finished successfully"
+        )
+        assert mock_enqueue.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_run_notifyme_task_agent_error_still_delivers_raw(test_sessions_dir):
+    """When agent fails, raw notification is still delivered."""
+    from main import run_notifyme_task
+
+    session_id = "session_test_agentfail"
+    session_path = os.path.join(test_sessions_dir, session_id)
+    os.makedirs(session_path, exist_ok=True)
+
+    mock_lock = MagicMock()
+    mock_lock.locked.return_value = False
+
+    with (
+        patch("main.process_chat") as mock_process_chat,
+        patch("main.enqueue_unread_message") as mock_enqueue,
+        patch("main.get_session_lock", return_value=mock_lock),
+    ):
+        mock_process_chat.side_effect = RuntimeError("agent exploded")
+
+        await run_notifyme_task(session_id, "background command finished")
+
+        # Raw notification still delivered.
+        mock_enqueue.assert_any_call(session_path, "background command finished")
+        # Error message enqueued as follow-up.
+        assert any(
+            "agent exploded" in str(call) for call in mock_enqueue.call_args_list
         )

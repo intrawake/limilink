@@ -138,8 +138,13 @@ async def poll_notifyme():
                         channel = client.get_channel(int(channel_id_str))
                         if channel:
                             await send_limilink_reply(channel, msg, session_id)
+                        else:
+                            logging.warning(
+                                f"poll_notifyme: channel {channel_id_str} not in cache, "
+                                f"dropping notification for session {session_id}"
+                            )
         except Exception:
-            pass
+            logging.debug("poll_notifyme error", exc_info=True)
 
 
 @client.event
