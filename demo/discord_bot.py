@@ -1,7 +1,7 @@
 import discord
 from discord.ext import tasks
 import os
-import httpx
+import httpx2 as httpx
 import json
 import tempfile
 import atexit

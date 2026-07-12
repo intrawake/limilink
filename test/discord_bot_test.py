@@ -41,7 +41,7 @@ class TestDiscordBot(unittest.TestCase):
             data = json.load(f)
         self.assertEqual(data["123"], "session_123")
 
-    @patch("httpx.AsyncClient")
+    @patch("demo.discord_bot.httpx.AsyncClient")
     @patch("discord.File")
     def test_outbox_processing(self, mock_file_class, mock_async_client_class):
         # Setup a mock session and outbox
@@ -104,7 +104,7 @@ class TestDiscordBot(unittest.TestCase):
             # Verify file was cleaned up
             self.assertFalse(os.path.exists(test_file))
 
-    @patch("httpx.AsyncClient")
+    @patch("demo.discord_bot.httpx.AsyncClient")
     @patch("discord.File")
     def test_error_propagation(self, mock_file_class, mock_async_client_class):
         # Setup a mock session
@@ -134,13 +134,13 @@ class TestDiscordBot(unittest.TestCase):
         mock_client_instance = mock_async_client_class.return_value
         mock_client_instance.__aenter__.return_value = mock_client_instance
 
-        import httpx
+        import demo.discord_bot as db
 
         mock_response = MagicMock()
         mock_response.status_code = 500
         mock_response.json.return_value = {"detail": "Gemini CLI failed: some error"}
 
-        mock_error = httpx.HTTPStatusError(
+        mock_error = db.httpx.HTTPStatusError(
             message="Server Error", request=MagicMock(), response=mock_response
         )
         mock_response.raise_for_status = MagicMock(side_effect=mock_error)
