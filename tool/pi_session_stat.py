@@ -2,7 +2,8 @@
 """
 pi_session_stat.py — Show context window usage for a pi-agent session.
 
-Pure JSONL parsing + models.json lookup. No SDK, no LLM calls, no session creation.
+Pure JSONL parsing with context window from pi-agent --list-models.
+No SDK, no LLM calls, no session creation.
 
 Usage:
     python3 pi_session_stat.py [session.jsonl]
@@ -12,6 +13,7 @@ If no path given, auto-detects from PI_CODING_AGENT_DIR env var.
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -43,34 +45,28 @@ def find_session_file():
     return None
 
 
-def find_models_json(session_path):
-    agent_dir = os.environ.get("PI_CODING_AGENT_DIR")
-    if agent_dir:
-        p = Path(agent_dir) / "models.json"
-        if p.exists():
-            return json.loads(p.read_text())
-
-    if session_path:
-        p = Path(session_path).parent.parent / "models.json"
-        if p.exists():
-            return json.loads(p.read_text())
-
-    p = Path.home() / ".pi" / "agent" / "models.json"
-    if p.exists():
-        return json.loads(p.read_text())
-
-    return None
-
-
-def lookup_context_window(models_json, provider, model_id):
-    if not models_json or "providers" not in models_json:
+def context_window_from_pi(pi_agent_dir, provider, model_id):
+    """Get context window label from pi-agent --list-models."""
+    pi_agent_exe = os.environ.get("PI_AGENT_EXE", "pi-agent")
+    env = {**os.environ, "PI_CODING_AGENT_DIR": pi_agent_dir}
+    try:
+        result = subprocess.run(
+            [pi_agent_exe, "--list-models"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=env,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return None
-    prov = models_json["providers"].get(provider)
-    if not prov or "models" not in prov:
+
+    if result.returncode != 0:
         return None
-    for m in prov["models"]:
-        if m.get("id") == model_id:
-            return m.get("contextWindow")
+
+    for line in result.stdout.strip().splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[0] == provider and parts[1] == model_id:
+            return parts[2]
     return None
 
 
@@ -134,10 +130,10 @@ def main():
                         if isinstance(cost, dict):
                             total_cost += cost.get("total", 0)
 
-    models_json = find_models_json(session_path)
-    context_window = None
-    if last_provider and last_model:
-        context_window = lookup_context_window(models_json, last_provider, last_model)
+    pi_agent_dir = os.environ.get("PI_CODING_AGENT_DIR")
+    context_label = None
+    if pi_agent_dir and last_provider and last_model:
+        context_label = context_window_from_pi(pi_agent_dir, last_provider, last_model)
 
     print(f"Session: {session_path.name}")
     if header and header.get("cwd"):
@@ -145,15 +141,12 @@ def main():
     provider_prefix = f"{last_provider}/" if last_provider else ""
     print(f"Model: {provider_prefix}{last_model or '(unknown)'}")
     print(
-        f"Context Window: {f'{context_window:,}' if context_window else 'unknown'} tokens"
+        f"Context Window: {context_label + ' tokens' if context_label else 'unknown'}"
     )
 
     if last_usage:
         context_used = last_usage.get("totalTokens", 0)
-        pct = f" ({context_used / context_window * 100:.1f}%)" if context_window else ""
-        print(f"Context Used: {context_used:,} tokens{pct}")
-        if context_window:
-            print(f"Context Remaining: {context_window - context_used:,} tokens")
+        print(f"Context Used: {context_used:,} tokens")
         print(
             f"  (input: {last_usage.get('input', 0):,}, cacheRead: {last_usage.get('cacheRead', 0):,}, output: {last_usage.get('output', 0):,})"
         )

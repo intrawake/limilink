@@ -216,7 +216,7 @@ def mock_config_pi_with_token_limits():
 
 @pytest.fixture
 def mock_config_pi_default_limits():
-    """Config where pi-agent preset has no token limits set (should use defaults)."""
+    """Config where pi-agent preset has no token limits set (unknown provider)."""
     with patch("main.load_config") as mock:
         mock.return_value = (
             {
@@ -224,6 +224,50 @@ def mock_config_pi_default_limits():
                     "pi-default": {
                         "harness": "pi",
                         "model": "auto",
+                    },
+                },
+                "pi_agent_openai_base_url": "http://test-host:11435/v1",
+                "pi_agent_openai_api_key": "test-sk-key",
+            },
+            "/test/config/dir",
+        )
+        yield mock
+
+
+@pytest.fixture
+def mock_config_pi_named_provider_no_limits():
+    """Config where pi-agent preset uses a named provider without token limits."""
+    with patch("main.load_config") as mock:
+        mock.return_value = (
+            {
+                "agent_by_alias": {
+                    "pi-ds": {
+                        "harness": "pi",
+                        "model": "deepseek-v4-pro",
+                        "provider": "deepseek",
+                    },
+                },
+                "pi_agent_openai_base_url": "http://test-host:11435/v1",
+                "pi_agent_openai_api_key": "test-sk-key",
+            },
+            "/test/config/dir",
+        )
+        yield mock
+
+
+@pytest.fixture
+def mock_config_pi_named_provider_with_limits():
+    """Config where pi-agent preset uses a named provider with explicit token limits."""
+    with patch("main.load_config") as mock:
+        mock.return_value = (
+            {
+                "agent_by_alias": {
+                    "pi-oai": {
+                        "harness": "pi",
+                        "model": "gpt-5.6-sol",
+                        "provider": "openai-codex",
+                        "token_ctx_limit": 333000,
+                        "token_gen_limit": 7777,
                     },
                 },
                 "pi_agent_openai_base_url": "http://test-host:11435/v1",
@@ -270,10 +314,10 @@ async def test_models_json_uses_custom_token_limits(
 
 @pytest.mark.asyncio
 @patch("main.asyncio.create_subprocess_exec")
-async def test_models_json_uses_default_token_limits(
+async def test_models_json_omits_limits_for_unknown_provider(
     mock_exec, mock_config_pi_default_limits, test_sessions_dir
 ):
-    """models.json should default to 128000/16384 when token limits aren't configured."""
+    """models.json should write model entry without limits when not configured."""
     mock_process = AsyncMock()
     mock_process.returncode = 0
     mock_process.communicate.return_value = (b"ok", b"")
@@ -296,5 +340,70 @@ async def test_models_json_uses_default_token_limits(
         models = json.load(f)
     provider = models["providers"]["default-provider"]
     model = provider["models"][0]
-    assert model["contextWindow"] == 128000
-    assert model["maxTokens"] == 16384
+    assert model["id"] == "auto"
+    assert "contextWindow" not in model
+    assert "maxTokens" not in model
+
+
+@pytest.mark.asyncio
+@patch("main.asyncio.create_subprocess_exec")
+async def test_models_json_named_provider_no_models_array(
+    mock_exec, mock_config_pi_named_provider_no_limits, test_sessions_dir
+):
+    """Named provider without limits should omit the models array entirely."""
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"ok", b"")
+    mock_exec.return_value = mock_process
+
+    import json
+
+    with TestClient(app) as c:
+        create_resp = c.post("/sessions?agent=pi-ds")
+        assert create_resp.status_code == 200
+        session_id = create_resp.json()["session_id"]
+
+        response = c.post("/chat", json={"message": "hello", "session_id": session_id})
+        assert response.status_code == 200
+
+    session_path = os.path.join(test_sessions_dir, session_id)
+    models_path = os.path.join(session_path, ".pi", "agent", "models.json")
+    assert os.path.exists(models_path)
+    with open(models_path) as f:
+        models = json.load(f)
+    provider = models["providers"]["deepseek"]
+    assert "models" not in provider
+    assert provider["baseUrl"] == "http://test-host:11435/v1"
+
+
+@pytest.mark.asyncio
+@patch("main.asyncio.create_subprocess_exec")
+async def test_models_json_named_provider_with_explicit_limits(
+    mock_exec, mock_config_pi_named_provider_with_limits, test_sessions_dir
+):
+    """Named provider with explicit limits should write model entry with overrides."""
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"ok", b"")
+    mock_exec.return_value = mock_process
+
+    import json
+
+    with TestClient(app) as c:
+        create_resp = c.post("/sessions?agent=pi-oai")
+        assert create_resp.status_code == 200
+        session_id = create_resp.json()["session_id"]
+
+        response = c.post("/chat", json={"message": "hello", "session_id": session_id})
+        assert response.status_code == 200
+
+    session_path = os.path.join(test_sessions_dir, session_id)
+    models_path = os.path.join(session_path, ".pi", "agent", "models.json")
+    assert os.path.exists(models_path)
+    with open(models_path) as f:
+        models = json.load(f)
+    provider = models["providers"]["openai-codex"]
+    model = provider["models"][0]
+    assert model["id"] == "gpt-5.6-sol"
+    assert model["contextWindow"] == 333000
+    assert model["maxTokens"] == 7777

@@ -368,33 +368,50 @@ def write_pi_models_json(
     cfg: dict[Any, Any],
     model: str,
 ):
-    """Write models.json for a pi-agent session based on the given preset and model."""
+    """Write models.json for a pi-agent session based on the given preset and model.
+
+    When a provider other than default-provider is configured without
+    explicit token limits, the models array is omitted so pi-agent
+    uses its built-in model definitions.  For default-provider (which
+    limilink invents) a model entry is always written, but limits are
+    included only when explicitly set in the preset.
+    """
     pi_base_url = preset.get("openai_base_url") or cfg.get("pi_agent_openai_base_url")
     if not pi_base_url:
         return
     pi_api_key = preset.get("openai_api_key") or cfg.get("pi_agent_openai_api_key")
     if not pi_api_key:
         return
-    token_ctx_limit = int(preset.get("token_ctx_limit", 128000))
-    token_gen_limit = int(preset.get("token_gen_limit", 16384))
     provider_name = preset.get("provider", PI_PROVIDER_NAME)
+
+    provider_config: dict[str, Any] = {
+        "baseUrl": pi_base_url,
+        "apiKey": pi_api_key,
+        "api": preset.get("provider_api")
+        or cfg.get("pi_agent_provider_api", "openai-completions"),
+    }
+
+    has_explicit_limits = "token_ctx_limit" in preset or "token_gen_limit" in preset
+
+    # Skip models array when a provider is specified without limits —
+    # pi-agent already knows its own models. Only default-provider
+    # (which limilink invents) needs a model entry since pi-agent
+    # has no built-in models for it.
+    if has_explicit_limits or provider_name == PI_PROVIDER_NAME:
+        model_entry: dict[str, Any] = {
+            "id": model,
+            "name": model,
+            "input": ["text"],
+        }
+        if "token_ctx_limit" in preset:
+            model_entry["contextWindow"] = int(preset["token_ctx_limit"])
+        if "token_gen_limit" in preset:
+            model_entry["maxTokens"] = int(preset["token_gen_limit"])
+        provider_config["models"] = [model_entry]
+
     models_config = {
         "providers": {
-            provider_name: {
-                "baseUrl": pi_base_url,
-                "apiKey": pi_api_key,
-                "api": preset.get("provider_api")
-                or cfg.get("pi_agent_provider_api", "openai-completions"),
-                "models": [
-                    {
-                        "id": model,
-                        "name": model,
-                        "contextWindow": token_ctx_limit,
-                        "maxTokens": token_gen_limit,
-                        "input": ["text"],
-                    }
-                ],
-            }
+            provider_name: provider_config,
         }
     }
     models_json_path = os.path.join(session_path, ".pi", "agent", "models.json")
