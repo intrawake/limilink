@@ -12,7 +12,7 @@ dependencies = [
     "fastapi>=0.111.0",
     "uvicorn>=0.29.0",
     "httpx2>=2.5.0",
-    "sxpb @ git+https://github.com/sxproto/sxpb-py.git@04c9bbe867eaacf5bda92f4ee777e9f8fcb2992a",
+    "sxpb @ git+https://github.com/sxproto/sxpb-py.git@aa4e1e5830483c8ba0c549f78dce38b5be9a1885",
 ]
 
 [project.optional-dependencies]
@@ -47,9 +47,12 @@ preset_discord_bot = { shell = "LIMILINK_CONFIG=preset/config.sxpb PYTHONPATH=sr
 test = "pytest -q"
 check-format = "ruff check"
 check-type = "ty check"
-tidy = "ruff format"
-lint = {composite = ["check-format", "check-type"]}
-tidytest = {composite = ["test", "tidy", "lint"]}
+lint-sxpb = "sxpb-lint --ignore-file .gitignore"
+tidy-python = "ruff format"
+tidy-sxpb = "sxpb-tidy --ignore-file .gitignore"
+tidy = {composite = ["tidy-python", "tidy-sxpb"]}
+lint = {composite = ["check-format", "check-type", "lint-sxpb"]}
+tidytest = {composite = ["tidy", "lint", "test"]}
 
 [tool.ty.environment]
 root = ["src", "test", "."]
