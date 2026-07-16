@@ -732,6 +732,81 @@ async def process_chat(session_id: str, message: str) -> str:
             append_to_history(session_path, "bot", reply)
             return reply
 
+        # Handle trace command (pi harness only)
+        stripped_message = message.strip()
+        if stripped_message == "!trace" or stripped_message.startswith("!trace "):
+            append_to_history(session_path, "user", message)
+            if harness != HarnessType.PI:
+                reply = "!trace is only available for the pi harness."
+                append_to_history(session_path, "bot", reply)
+                return reply
+
+            parts = stripped_message.split()
+            if len(parts) not in (2, 3):
+                reply = "Usage: !trace tool [COUNT]"
+                append_to_history(session_path, "bot", reply)
+                return reply
+            if parts[1] != "tool":
+                reply = f"Unsupported trace selector '{parts[1]}'. Available: tool"
+                append_to_history(session_path, "bot", reply)
+                return reply
+
+            count = 10
+            if len(parts) == 3:
+                try:
+                    count = int(parts[2])
+                except ValueError:
+                    reply = "COUNT must be an integer between 1 and 100."
+                    append_to_history(session_path, "bot", reply)
+                    return reply
+                if not 1 <= count <= 100:
+                    reply = "COUNT must be an integer between 1 and 100."
+                    append_to_history(session_path, "bot", reply)
+                    return reply
+
+            pi_session_dir = os.path.join(session_path, ".pi", "agent", "session")
+            jsonl_paths = (
+                [
+                    os.path.join(pi_session_dir, name)
+                    for name in os.listdir(pi_session_dir)
+                    if name.endswith(".jsonl")
+                ]
+                if os.path.isdir(pi_session_dir)
+                else []
+            )
+            if not jsonl_paths:
+                reply = "No pi-agent session data found. Send a message first!"
+                append_to_history(session_path, "bot", reply)
+                return reply
+            jsonl_path = max(jsonl_paths, key=os.path.getmtime)
+
+            trace_script = os.path.normpath(
+                os.path.join(
+                    os.path.dirname(__file__), "..", "tool", "pi_session_trace.py"
+                )
+            )
+            try:
+                trace_result = await asyncio.create_subprocess_exec(
+                    "python3",
+                    trace_script,
+                    "tool",
+                    str(count),
+                    "--session",
+                    jsonl_path,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=session_path,
+                )
+                stdout, stderr = await trace_result.communicate()
+                if trace_result.returncode == 0:
+                    reply = stdout.decode().strip()
+                else:
+                    reply = f"Trace failed: {stderr.decode().strip()}"
+            except Exception as e:
+                reply = f"Trace error: {e}"
+            append_to_history(session_path, "bot", reply)
+            return reply
+
         # Handle stat command (pi harness only)
         if message.strip() == "!stat":
             append_to_history(session_path, "user", message)

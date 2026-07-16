@@ -34,6 +34,15 @@ Repository = "https://github.com/intrawake/limilink"
 requires = ["pdm-backend"]
 build-backend = "pdm.backend"
 
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "respx>=0.22.0",
+    "ruff",
+    "ty",
+]
+
 [tool.pytest.ini_options]
 addopts = "-q"
 pythonpath = ["src", "."]
@@ -56,12 +65,3 @@ tidytest = {composite = ["tidy", "lint", "test"]}
 
 [tool.ty.environment]
 root = ["src", "test", "."]
-
-[dependency-groups]
-dev = [
-    "pytest>=9.0.2",
-    "pytest-asyncio>=1.3.0",
-    "respx>=0.22.0",
-    "ruff",
-    "ty",
-]

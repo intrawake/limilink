@@ -428,3 +428,95 @@ async def test_stat_pi_with_data(mock_exec, mock_config, test_sessions_dir):
     assert cmd[0] == "python3"
     assert cmd[1].endswith("pi_session_stat.py")
     assert cmd[2].endswith("test.jsonl")
+
+
+@pytest.mark.asyncio
+async def test_trace_gemini_cli_harness(mock_config):
+    """!trace on gemini-cli harness should say it is pi-only."""
+    with TestClient(app) as c:
+        response = c.post(
+            "/chat",
+            json={"message": "!trace tool 5", "session_id": "test_trace_gemini"},
+        )
+
+    assert response.status_code == 200
+    assert "only available for the pi harness" in response.json()["reply"]
+
+
+@pytest.mark.asyncio
+async def test_trace_pi_validates_command(mock_config):
+    """!trace validates selectors and counts before looking for session data."""
+    session_id = "test_trace_validation"
+    with TestClient(app) as c:
+        c.post(
+            "/chat",
+            json={"message": "!agent pi-agent", "session_id": session_id},
+        )
+        usage = c.post("/chat", json={"message": "!trace", "session_id": session_id})
+        selector = c.post(
+            "/chat",
+            json={"message": "!trace message 5", "session_id": session_id},
+        )
+        count = c.post(
+            "/chat",
+            json={"message": "!trace tool 0", "session_id": session_id},
+        )
+
+    assert usage.json()["reply"] == "Usage: !trace tool [COUNT]"
+    assert "Unsupported trace selector 'message'" in selector.json()["reply"]
+    assert count.json()["reply"] == "COUNT must be an integer between 1 and 100."
+
+
+@pytest.mark.asyncio
+async def test_trace_pi_no_data(mock_config):
+    """!trace reports when a pi session has no JSONL yet."""
+    session_id = "test_trace_no_data"
+    with TestClient(app) as c:
+        c.post(
+            "/chat",
+            json={"message": "!agent pi-agent", "session_id": session_id},
+        )
+        response = c.post(
+            "/chat",
+            json={"message": "!trace tool 5", "session_id": session_id},
+        )
+
+    assert response.status_code == 200
+    assert "No pi-agent session data found" in response.json()["reply"]
+
+
+@pytest.mark.asyncio
+@patch("main.asyncio.create_subprocess_exec")
+async def test_trace_pi_with_data(mock_exec, mock_config, test_sessions_dir):
+    """!trace invokes the local trace script for the current pi session."""
+    import os as _os
+
+    session_id = "test_trace_pi_data"
+    session_path = _os.path.join(test_sessions_dir, session_id)
+    pi_session_dir = _os.path.join(session_path, ".pi", "agent", "session")
+    _os.makedirs(pi_session_dir, exist_ok=True)
+    with open(_os.path.join(session_path, ".agent_type"), "w") as output:
+        output.write("pi-agent")
+    jsonl_path = _os.path.join(pi_session_dir, "test.jsonl")
+    with open(jsonl_path, "w") as output:
+        output.write('{"type":"session","cwd":"/test"}\n')
+
+    trace_process = AsyncMock()
+    trace_process.returncode = 0
+    trace_process.communicate.return_value = (b"read\t.\tMEMORY.md\n", b"")
+    mock_exec.return_value = trace_process
+
+    with TestClient(app) as c:
+        response = c.post(
+            "/chat",
+            json={"message": "!trace tool 5", "session_id": session_id},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["reply"] == "read\t.\tMEMORY.md"
+    mock_exec.assert_called_once()
+    cmd = mock_exec.call_args[0]
+    assert cmd[0] == "python3"
+    assert cmd[1].endswith("pi_session_trace.py")
+    assert cmd[2:5] == ("tool", "5", "--session")
+    assert cmd[5] == jsonl_path

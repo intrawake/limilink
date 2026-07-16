@@ -5,6 +5,7 @@ import time
 import argparse
 import subprocess
 
+
 def notify(message):
     """Notify the current Limilink session."""
     tool_dir = os.path.dirname(os.path.abspath(__file__))
@@ -15,18 +16,32 @@ def notify(message):
         # Fallback to PATH
         subprocess.run(["notifyme", message])
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run a command and notify upon completion. Backgrounds itself after a delay if the command is still running.",
-        add_help=False
+        add_help=False,
     )
     # Define flags manually to allow for positional command at the end
-    parser.add_argument("--stdin", help="File to read stdin from. Defaults to /dev/null.")
-    parser.add_argument("--stdout", help="File to write stdout to. Defaults to /dev/null.")
-    parser.add_argument("--stderr", help="File to write stderr to. Defaults to stdout target.")
-    parser.add_argument("--delay", type=float, default=5.0, help="Time to wait before backgrounding (seconds). Default: 5.0.")
-    parser.add_argument("--help", action="help", help="Show this help message and exit.")
-    
+    parser.add_argument(
+        "--stdin", help="File to read stdin from. Defaults to /dev/null."
+    )
+    parser.add_argument(
+        "--stdout", help="File to write stdout to. Defaults to /dev/null."
+    )
+    parser.add_argument(
+        "--stderr", help="File to write stderr to. Defaults to stdout target."
+    )
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=5.0,
+        help="Time to wait before backgrounding (seconds). Default: 5.0.",
+    )
+    parser.add_argument(
+        "--help", action="help", help="Show this help message and exit."
+    )
+
     # We use parse_known_args to separate our flags from the command
     args, command = parser.parse_known_args()
 
@@ -41,7 +56,7 @@ def main():
     command_str = " ".join(command)
 
     try:
-        # We fork so that the monitor process (child) can stay alive after 
+        # We fork so that the monitor process (child) can stay alive after
         # the parent exits (backgrounding).
         c_pid = os.fork()
     except OSError as e:
@@ -51,26 +66,23 @@ def main():
     if c_pid == 0:
         # Child: The Monitor
         try:
-            stdin_fd = open(args.stdin, 'r') if args.stdin else open(os.devnull, 'r')
-            stdout_fd = open(args.stdout, 'a') if args.stdout else open(os.devnull, 'a')
+            stdin_fd = open(args.stdin, "r") if args.stdin else open(os.devnull, "r")
+            stdout_fd = open(args.stdout, "a") if args.stdout else open(os.devnull, "a")
             if args.stderr:
-                stderr_fd = open(args.stderr, 'a')
+                stderr_fd = open(args.stderr, "a")
             else:
                 stderr_fd = stdout_fd
         except Exception as e:
             print(f"Failed to open IO files: {e}", file=sys.stderr)
             sys.exit(1)
 
-        # Start the subprocess. 
-        # We don't use start_new_session=True here so it can be Ctrl+C'd 
+        # Start the subprocess.
+        # We don't use start_new_session=True here so it can be Ctrl+C'd
         # during the initial delay if desired.
         proc = subprocess.Popen(
-            command,
-            stdin=stdin_fd,
-            stdout=stdout_fd,
-            stderr=stderr_fd
+            command, stdin=stdin_fd, stdout=stdout_fd, stderr=stderr_fd
         )
-        
+
         # Close inherited FDs in the monitor process
         stdin_fd.close()
         if stdout_fd != stderr_fd:
@@ -96,11 +108,14 @@ def main():
                 else:
                     sys.exit(1)
             time.sleep(0.1)
-        
+
         # Delay passed, child is still running the command.
         # We exit, leaving the child (monitor) to finish in the background.
-        print(f"Command still running after {args.delay}s. Backgrounding limilink_continue_after...")
+        print(
+            f"Command still running after {args.delay}s. Backgrounding limilink_continue_after..."
+        )
         sys.exit(0)
+
 
 if __name__ == "__main__":
     main()
