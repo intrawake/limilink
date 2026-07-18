@@ -659,3 +659,18 @@ async def test_run_notifyme_task_agent_error_still_delivers_raw(test_sessions_di
         assert any(
             "agent exploded" in str(call) for call in mock_enqueue.call_args_list
         )
+
+
+@patch("main.load_config")
+def test_unrecognized_exclamation_command_not_forwarded(mock_load_config):
+    """Unrecognized ! commands return an error and are never forwarded to the agent."""
+    mock_load_config.return_value = (
+        {"agent_by_alias": {"gemini-cli": {"harness": "gemini-cli"}}},
+        "/fake/config/dir",
+    )
+    session_id = "test_bang_unknown"
+    response = client.post(
+        "/chat", json={"message": "!nonexistent_cmd", "session_id": session_id}
+    )
+    assert response.status_code == 200
+    assert response.json()["reply"] == "Unknown command: !nonexistent_cmd"

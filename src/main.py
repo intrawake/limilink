@@ -855,6 +855,13 @@ async def process_chat(session_id: str, message: str) -> str:
             append_to_history(session_path, "bot", reply)
             return reply
 
+        # Catch-all: any message starting with ! is a command; never forward to agent
+        if message.strip().startswith("!"):
+            append_to_history(session_path, "user", message)
+            reply = f"Unknown command: {message.strip().split()[0]}"
+            append_to_history(session_path, "bot", reply)
+            return reply
+
         env = os.environ.copy()
         env["LIMILINK_SESSION"] = safe_session_id
         env["TMPDIR"] = get_session_tmp_dir(session_path)
