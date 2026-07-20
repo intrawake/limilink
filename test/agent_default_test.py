@@ -164,10 +164,10 @@ def test_create_session_with_pi_agent(mock_config_pi_first, test_sessions_dir):
         assert f.read().strip() == "pi-agent"
 
 
-def test_create_session_without_agent_no_agent_type(
+def test_create_session_without_agent_persists_default(
     mock_config_pi_first, test_sessions_dir
 ):
-    """POST /sessions without agent param should NOT create .agent_type."""
+    """POST /sessions resolves and persists the first configured agent."""
     with TestClient(app) as c:
         response = c.post("/sessions")
         assert response.status_code == 200
@@ -175,7 +175,37 @@ def test_create_session_without_agent_no_agent_type(
 
     session_path = os.path.join(test_sessions_dir, session_id)
     agent_file = os.path.join(session_path, ".agent_type")
-    assert not os.path.exists(agent_file)
+    assert os.path.exists(agent_file)
+    with open(agent_file) as f:
+        assert f.read().strip() == "pi-agent"
+
+
+def test_default_agent_resources_exist_before_first_chat(tmp_path, test_sessions_dir):
+    """An implicit default agent gets its auth link during session creation."""
+    auth_path = tmp_path / "deepseek-auth.json"
+    auth_path.write_text("{}")
+    config = {
+        "agent_by_alias": {
+            "pi-auth": {
+                "harness": "pi",
+                "model": "deepseek-v4-flash",
+                "provider": "deepseek",
+                "session_symlink_dict": {
+                    ".pi/agent/auth.json": str(auth_path),
+                },
+            },
+        },
+    }
+
+    with patch("main.load_config", return_value=(config, str(tmp_path))):
+        with TestClient(app) as c:
+            response = c.post("/sessions")
+
+    assert response.status_code == 200
+    session_path = os.path.join(test_sessions_dir, response.json()["session_id"])
+    auth_link = os.path.join(session_path, ".pi", "agent", "auth.json")
+    assert os.path.islink(auth_link)
+    assert os.path.realpath(auth_link) == str(auth_path)
 
 
 def test_new_session_returns_unique_ids(mock_config_pi_first, test_sessions_dir):

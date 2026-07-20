@@ -12,7 +12,7 @@ dependencies = [
     "fastapi>=0.111.0",
     "uvicorn>=0.29.0",
     "httpx2>=2.5.0",
-    "sxpb @ git+https://github.com/sxproto/sxpb-py.git@02bf7b5d5ab5be6e9756e6c0ec3d463fca2c62dd",
+    "sxpb @ git+https://github.com/sxproto/sxpb-py.git@3a84ab22bec2d10734f7eb6dba8ffce09eb1a650",
 ]
 
 [project.optional-dependencies]

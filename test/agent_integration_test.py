@@ -71,6 +71,71 @@ async def test_agent_switching(mock_exec, mock_config):
 
 
 @pytest.mark.asyncio
+async def test_agent_switch_reconciles_pi_resources(tmp_path, test_sessions_dir):
+    """Switching Pi presets replaces auth and clears stale per-agent state."""
+    import json
+    import os
+
+    first_auth = tmp_path / "first-auth.json"
+    second_auth = tmp_path / "second-auth.json"
+    first_auth.write_text("{}")
+    second_auth.write_text("{}")
+    config = {
+        "agent_by_alias": {
+            "pi-first": {
+                "harness": "pi",
+                "model": "deepseek-v4-flash",
+                "provider": "deepseek",
+                "reasoning_effort": "low",
+                "session_symlink_dict": {
+                    ".pi/agent/auth.json": str(first_auth),
+                },
+            },
+            "pi-second": {
+                "harness": "pi",
+                "model": "gpt-5.6-sol",
+                "provider": "openai-codex",
+                "reasoning_effort": "high",
+                "session_symlink_dict": {
+                    ".pi/agent/auth.json": str(second_auth),
+                },
+            },
+        },
+    }
+
+    with patch("main.load_config", return_value=(config, str(tmp_path))):
+        with TestClient(app) as c:
+            create_response = c.post("/sessions?agent=pi-first")
+            session_id = create_response.json()["session_id"]
+            session_path = os.path.join(test_sessions_dir, session_id)
+            c.post(
+                "/chat",
+                json={"message": "!model stale-model", "session_id": session_id},
+            )
+            c.post(
+                "/chat",
+                json={"message": "!reasoning_effort xhigh", "session_id": session_id},
+            )
+            models_path = os.path.join(session_path, ".pi", "agent", "models.json")
+            with open(models_path, "w") as f:
+                json.dump({"providers": {"stale": {}}}, f)
+
+            response = c.post(
+                "/chat",
+                json={"message": "!agent pi-second", "session_id": session_id},
+            )
+
+    assert response.json()["reply"] == "Agent switched to: pi-second"
+    auth_link = os.path.join(session_path, ".pi", "agent", "auth.json")
+    assert os.path.realpath(auth_link) == str(second_auth)
+    assert not os.path.exists(os.path.join(session_path, ".model"))
+    assert not os.path.exists(os.path.join(session_path, ".reasoning_effort"))
+    assert not os.path.exists(models_path)
+    with open(os.path.join(session_path, ".pi", "agent", "settings.json")) as f:
+        assert json.load(f)["defaultThinkingLevel"] == "high"
+
+
+@pytest.mark.asyncio
 @patch("main.asyncio.create_subprocess_exec")
 async def test_pi_agent_env_vars(mock_exec, mock_config):
     mock_process = AsyncMock()
@@ -201,9 +266,17 @@ async def test_reasoning_effort_show_from_preset_before_first_chat(mock_config):
 
 
 @pytest.mark.asyncio
-async def test_reasoning_effort_set_and_query(mock_config, test_sessions_dir):
-    """!reasoning_effort <level> sets it and persists across queries."""
+@patch("main.asyncio.create_subprocess_exec")
+async def test_reasoning_effort_set_and_query(
+    mock_exec, mock_config, test_sessions_dir
+):
+    """!reasoning_effort persists and is passed explicitly to Pi."""
     import os as _os
+
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"ok", b"")
+    mock_exec.return_value = mock_process
 
     session_id = "test_reasoning_effort_set"
     session_path = _os.path.join(test_sessions_dir, session_id)
@@ -250,6 +323,13 @@ async def test_reasoning_effort_set_and_query(mock_config, test_sessions_dir):
             json={"message": "!reasoning_effort", "session_id": session_id},
         )
         assert "Current reasoning level: xhigh" in response.json()["reply"]
+
+        response = c.post("/chat", json={"message": "hello", "session_id": session_id})
+        assert response.status_code == 200
+
+    cmd = list(mock_exec.call_args[0])
+    thinking_index = cmd.index("--thinking")
+    assert cmd[thinking_index + 1] == "xhigh"
 
     # Verify settings.json was written
     settings_path = _os.path.join(session_path, ".pi", "agent", "settings.json")
@@ -336,50 +416,57 @@ async def test_reasoning_effort_in_preset_writes_settings(
         settings = _json.load(f)
     assert settings["defaultThinkingLevel"] == "high"
 
+    cmd = list(mock_exec.call_args[0])
+    thinking_index = cmd.index("--thinking")
+    assert cmd[thinking_index + 1] == "high"
+
 
 @pytest.mark.asyncio
-async def test_write_pi_settings_json_idempotent(mock_config, test_sessions_dir):
-    """write_pi_settings_json does not overwrite existing settings.json."""
+async def test_write_pi_settings_json_synchronizes_level(
+    mock_config, test_sessions_dir
+):
+    """Reasoning synchronization updates its key and preserves other settings."""
     import os as _os
     import json as _json
 
-    session_id = "test_settings_idempotent"
+    session_id = "test_settings_sync"
     session_path = _os.path.join(test_sessions_dir, session_id)
-    _os.makedirs(session_path, exist_ok=True)
     settings_dir = _os.path.join(session_path, ".pi", "agent")
     _os.makedirs(settings_dir, exist_ok=True)
 
-    # Pre-create settings.json with a different level (simulating !reasoning_effort change)
     settings_path = _os.path.join(settings_dir, "settings.json")
     with open(settings_path, "w") as f:
-        _json.dump({"defaultThinkingLevel": "low"}, f)
+        _json.dump({"defaultThinkingLevel": "low", "theme": "dark"}, f)
 
     from main import write_pi_settings_json
 
-    preset = {"reasoning_effort": "high"}
-    write_pi_settings_json(session_path, preset)
+    write_pi_settings_json(session_path, "high")
 
-    # Should still be "low" — not overwritten
     with open(settings_path) as f:
         settings = _json.load(f)
-    assert settings["defaultThinkingLevel"] == "low"
+    assert settings == {"defaultThinkingLevel": "high", "theme": "dark"}
 
 
 @pytest.mark.asyncio
-async def test_write_pi_settings_json_no_preset(test_sessions_dir):
-    """write_pi_settings_json does nothing when preset has no reasoning_effort."""
+async def test_write_pi_settings_json_clears_level(test_sessions_dir):
+    """Selecting a preset without reasoning removes the stale default."""
     import os as _os
+    import json as _json
 
-    session_id = "test_settings_no_preset"
+    session_id = "test_settings_clear"
     session_path = _os.path.join(test_sessions_dir, session_id)
-    _os.makedirs(session_path, exist_ok=True)
+    settings_dir = _os.path.join(session_path, ".pi", "agent")
+    _os.makedirs(settings_dir, exist_ok=True)
+    settings_path = _os.path.join(settings_dir, "settings.json")
+    with open(settings_path, "w") as f:
+        _json.dump({"defaultThinkingLevel": "high", "theme": "dark"}, f)
 
     from main import write_pi_settings_json
 
-    write_pi_settings_json(session_path, {})
+    write_pi_settings_json(session_path, None)
 
-    settings_path = _os.path.join(session_path, ".pi", "agent", "settings.json")
-    assert not _os.path.exists(settings_path)
+    with open(settings_path) as f:
+        assert _json.load(f) == {"theme": "dark"}
 
 
 @pytest.mark.asyncio

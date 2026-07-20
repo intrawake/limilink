@@ -42,9 +42,6 @@ class HarnessType(str, Enum):
 # Global tracker for running Gemini CLI processes (session_id -> process)
 running_processes: dict[str, asyncio.subprocess.Process] = {}
 session_locks: dict[str, asyncio.Lock] = {}
-# Session-scoped reasoning effort overrides (set via !reasoning_effort).
-# Persisted only to settings.json for pi-agent, not read back by us.
-session_reasoning_effort: dict[str, str] = {}
 
 
 def get_session_lock(session_id: str) -> asyncio.Lock:
@@ -157,23 +154,102 @@ def resolve_config_path(path: str, config_dir: str) -> str:
     return os.path.normpath(os.path.join(config_dir, expanded))
 
 
-def get_session_symlink_dict(
-    cfg: dict[Any, Any], agent_alias: str | None = None
-) -> dict[str, str]:
-    symlinks = cfg.get("session_symlink_dict", {})
-    if not isinstance(symlinks, dict):
-        symlinks = {}
+def _absolute_link_target(link_path: str) -> str:
+    target = os.readlink(link_path)
+    if not os.path.isabs(target):
+        target = os.path.join(os.path.dirname(link_path), target)
+    return os.path.normpath(target)
 
-    if not agent_alias:
-        return dict(symlinks)
+
+def reconcile_session_symlinks(
+    session_path: str,
+    cfg: dict[Any, Any],
+    config_dir: str,
+    agent_alias: str | None,
+):
+    """Create global links and safely replace links owned by agent presets."""
+    global_symlinks = cfg.get("session_symlink_dict", {})
+    if not isinstance(global_symlinks, dict):
+        global_symlinks = {}
 
     agent_by_alias = cfg.get("agent_by_alias", {})
-    agent_preset = agent_by_alias.get(agent_alias, {})
-    agent_symlinks = agent_preset.get("session_symlink_dict", {})
-    if not isinstance(agent_symlinks, dict):
-        return dict(symlinks)
+    if not isinstance(agent_by_alias, dict):
+        agent_by_alias = {}
 
-    return {**symlinks, **agent_symlinks}
+    agent_symlinks_by_alias: dict[str, dict[Any, Any]] = {}
+    managed_targets_by_relpath: dict[str, set[str]] = {}
+    for alias, preset in agent_by_alias.items():
+        if not isinstance(preset, dict):
+            continue
+        agent_symlinks = preset.get("session_symlink_dict", {})
+        if not isinstance(agent_symlinks, dict):
+            continue
+        agent_symlinks_by_alias[str(alias)] = agent_symlinks
+        for relpath, target in agent_symlinks.items():
+            managed_targets_by_relpath.setdefault(str(relpath), set()).add(
+                resolve_config_path(str(target), config_dir)
+            )
+
+    # Global-only links are additive. Limilink never replaces an unrelated path.
+    for relpath, target in global_symlinks.items():
+        relpath = str(relpath)
+        if relpath in managed_targets_by_relpath:
+            continue
+        link_path = os.path.join(session_path, relpath)
+        if os.path.lexists(link_path):
+            continue
+        try:
+            os.makedirs(os.path.dirname(link_path), exist_ok=True)
+            os.symlink(resolve_config_path(str(target), config_dir), link_path)
+        except Exception as e:
+            print(f"Failed to create symlink {link_path}: {e}")
+
+    for relpath, target in global_symlinks.items():
+        relpath = str(relpath)
+        if relpath in managed_targets_by_relpath:
+            managed_targets_by_relpath[relpath].add(
+                resolve_config_path(str(target), config_dir)
+            )
+
+    selected_symlinks = agent_symlinks_by_alias.get(agent_alias or "", {})
+    for relpath, managed_targets in managed_targets_by_relpath.items():
+        selected_target = selected_symlinks.get(relpath, global_symlinks.get(relpath))
+        desired_target = (
+            resolve_config_path(str(selected_target), config_dir)
+            if selected_target is not None
+            else None
+        )
+        link_path = os.path.join(session_path, relpath)
+
+        if not os.path.lexists(link_path):
+            if desired_target is not None:
+                try:
+                    os.makedirs(os.path.dirname(link_path), exist_ok=True)
+                    os.symlink(desired_target, link_path)
+                except Exception as e:
+                    print(f"Failed to create symlink {link_path}: {e}")
+            continue
+
+        if not os.path.islink(link_path):
+            print(f"Refusing to replace non-symlink agent resource: {link_path}")
+            continue
+
+        current_target = _absolute_link_target(link_path)
+        if current_target == desired_target:
+            continue
+        if current_target not in managed_targets:
+            print(f"Refusing to replace unmanaged symlink: {link_path}")
+            continue
+
+        try:
+            if desired_target is None:
+                os.unlink(link_path)
+            else:
+                replacement_path = f"{link_path}.limilink-{uuid.uuid4().hex}"
+                os.symlink(desired_target, replacement_path)
+                os.replace(replacement_path, link_path)
+        except Exception as e:
+            print(f"Failed to reconcile symlink {link_path}: {e}")
 
 
 def ensure_session_initialized(
@@ -182,46 +258,34 @@ def ensure_session_initialized(
     config_dir: str,
     agent_alias: str | None = None,
 ):
-    # Marker to avoid re-initialization
     init_marker = os.path.join(session_path, ".initialized")
-    if os.path.exists(init_marker):
-        return
+    first_initialization = not os.path.exists(init_marker)
 
-    # 1. Mark it as a project root so gemini-cli scopes history to this folder
-    project_root_marker = os.path.join(session_path, ".project_root")
-    if not os.path.exists(project_root_marker):
-        with open(project_root_marker, "a"):
+    if first_initialization:
+        # Mark it as a project root so gemini-cli scopes history to this folder.
+        project_root_marker = os.path.join(session_path, ".project_root")
+        if not os.path.exists(project_root_marker):
+            with open(project_root_marker, "a"):
+                pass
+
+        workspace_md_rel = cfg.get("gemini_workspace_md")
+        if workspace_md_rel:
+            workspace_md_abs = resolve_config_path(workspace_md_rel, config_dir)
+            if os.path.exists(workspace_md_abs):
+                target_md = os.path.join(session_path, "GEMINI.md")
+                if not os.path.exists(target_md):
+                    shutil.copy2(workspace_md_abs, target_md)
+
+        os.makedirs(os.path.join(session_path, "outbox"), exist_ok=True)
+        os.makedirs(os.path.join(session_path, ".pi", "agent"), exist_ok=True)
+
+    # Agent resources are intentionally reconciled even after initialization.
+    # This repairs old default sessions and makes !agent switching effective.
+    reconcile_session_symlinks(session_path, cfg, config_dir, agent_alias)
+
+    if first_initialization:
+        with open(init_marker, "a"):
             pass
-
-    # 2. Copy workspace GEMINI.md if configured
-    workspace_md_rel = cfg.get("gemini_workspace_md")
-    if workspace_md_rel:
-        workspace_md_abs = resolve_config_path(workspace_md_rel, config_dir)
-        if os.path.exists(workspace_md_abs):
-            target_md = os.path.join(session_path, "GEMINI.md")
-            if not os.path.exists(target_md):
-                shutil.copy2(workspace_md_abs, target_md)
-
-    # 3. Create symlinks if configured. Agent-specific entries override globals.
-    for relpath, target in get_session_symlink_dict(cfg, agent_alias).items():
-        target_abs = resolve_config_path(target, config_dir)
-        link_path = os.path.join(session_path, relpath)
-        if not os.path.exists(link_path) and not os.path.islink(link_path):
-            try:
-                os.makedirs(os.path.dirname(link_path), exist_ok=True)
-                os.symlink(target_abs, link_path)
-            except Exception as e:
-                print(f"Failed to create symlink {link_path} -> {target_abs}: {e}")
-
-    # 4. Create an outbox directory for file sending
-    os.makedirs(os.path.join(session_path, "outbox"), exist_ok=True)
-
-    # 5. Create pi agent directories for models.json, auth.json, and settings
-    os.makedirs(os.path.join(session_path, ".pi", "agent"), exist_ok=True)
-
-    # 6. Mark as initialized
-    with open(init_marker, "a"):
-        pass
 
 
 @app.get("/sessions", response_model=SessionListResponse)
@@ -247,28 +311,34 @@ async def create_session(agent: str | None = None):
     session_id = f"session_{uuid.uuid4().hex[:8]}"
     safe_id = sanitize_session_id(session_id)
 
-    # Validate agent if provided
-    if agent is not None:
-        agent_by_alias = cfg.get("agent_by_alias", {})
-        valid_agents = (
-            list(HarnessType) + ["gemini", "pi-agent"] + list(agent_by_alias.keys())
+    agent_by_alias = cfg.get("agent_by_alias", {})
+    if not agent_by_alias:
+        raise HTTPException(
+            status_code=500, detail="Missing 'agent_by_alias' in config.sxpb"
         )
-        if agent not in valid_agents:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid agent '{agent}'. Supported: {', '.join(sorted(set(valid_agents)))}",
-            )
+
+    # Resolve the default before initialization so its agent-specific resources
+    # are present from the first message onward.
+    effective_agent = agent or next(iter(agent_by_alias))
+    valid_agents = (
+        list(HarnessType) + ["gemini", "pi-agent"] + list(agent_by_alias.keys())
+    )
+    if effective_agent not in valid_agents:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid agent '{effective_agent}'. Supported: {', '.join(sorted(set(valid_agents)))}",
+        )
 
     session_path = os.path.join(sessions_dir, safe_id)
     os.makedirs(session_path, exist_ok=True)
 
-    ensure_session_initialized(session_path, cfg, config_dir, agent_alias=agent)
+    ensure_session_initialized(
+        session_path, cfg, config_dir, agent_alias=effective_agent
+    )
 
-    # Write .agent_type if an agent was specified
-    if agent is not None:
-        agent_path = os.path.join(session_path, ".agent_type")
-        with open(agent_path, "w") as f:
-            f.write(agent)
+    agent_path = os.path.join(session_path, ".agent_type")
+    with open(agent_path, "w") as f:
+        f.write(effective_agent)
 
     return {"status": "created", "session_id": safe_id}
 
@@ -337,29 +407,53 @@ async def get_session_history(session_id: str):
 
 PI_PROVIDER_NAME = "default-provider"
 
-VALID_REASONING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"]
+VALID_REASONING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 
-def write_pi_settings_json(
-    session_path: str,
-    preset: dict[Any, Any],
-):
-    """Write settings.json for a pi-agent session with reasoning level.
+def get_reasoning_effort_override(session_path: str) -> str | None:
+    override_path = os.path.join(session_path, ".reasoning_effort")
+    try:
+        with open(override_path) as f:
+            level = f.read().strip()
+        return level if level in VALID_REASONING_LEVELS else None
+    except FileNotFoundError:
+        return None
 
-    Only writes if settings.json doesn't exist yet, so !reasoning_effort
-    changes within a session aren't overwritten.
-    """
-    reasoning_effort = preset.get("reasoning_effort")
-    if not reasoning_effort:
+
+def set_reasoning_effort_override(session_path: str, level: str | None):
+    override_path = os.path.join(session_path, ".reasoning_effort")
+    if level is None:
+        if os.path.exists(override_path):
+            os.unlink(override_path)
         return
+    with open(override_path, "w") as f:
+        f.write(level)
 
+
+def write_pi_settings_json(session_path: str, reasoning_effort: str | None):
+    """Synchronize Pi's default thinking level while preserving other settings."""
     settings_path = os.path.join(session_path, ".pi", "agent", "settings.json")
+    settings = {}
     if os.path.exists(settings_path):
+        try:
+            with open(settings_path) as f:
+                settings = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            settings = {}
+
+    if reasoning_effort is None:
+        settings.pop("defaultThinkingLevel", None)
+    else:
+        settings["defaultThinkingLevel"] = reasoning_effort
+
+    if not settings:
+        if os.path.exists(settings_path):
+            os.unlink(settings_path)
         return
 
     os.makedirs(os.path.dirname(settings_path), exist_ok=True)
     with open(settings_path, "w") as f:
-        json.dump({"defaultThinkingLevel": reasoning_effort}, f, indent=2)
+        json.dump(settings, f, indent=2)
 
 
 def write_pi_models_json(
@@ -376,11 +470,15 @@ def write_pi_models_json(
     limilink invents) a model entry is always written, but limits are
     included only when explicitly set in the preset.
     """
+    models_json_path = os.path.join(session_path, ".pi", "agent", "models.json")
     pi_base_url = preset.get("openai_base_url") or cfg.get("pi_agent_openai_base_url")
-    if not pi_base_url:
-        return
     pi_api_key = preset.get("openai_api_key") or cfg.get("pi_agent_openai_api_key")
-    if not pi_api_key:
+    if not pi_base_url or not pi_api_key:
+        # Auth-backed built-in providers need no custom registry. Remove a
+        # generated file left behind by the previous agent instead of letting it
+        # silently influence the new one.
+        if os.path.exists(models_json_path):
+            os.unlink(models_json_path)
         return
     provider_name = preset.get("provider", PI_PROVIDER_NAME)
 
@@ -414,7 +512,6 @@ def write_pi_models_json(
             provider_name: provider_config,
         }
     }
-    models_json_path = os.path.join(session_path, ".pi", "agent", "models.json")
     os.makedirs(os.path.dirname(models_json_path), exist_ok=True)
     with open(models_json_path, "w") as f:
         json.dump(models_config, f, indent=2)
@@ -480,10 +577,9 @@ async def process_chat(session_id: str, message: str) -> str:
             else:
                 current_model = "auto"
 
-        # Determine reasoning effort for this session.
-        # Session override (from !reasoning_effort) takes precedence over preset.
-        # No harness file reads — we track it in memory.
-        current_reasoning_effort = session_reasoning_effort.get(safe_session_id)
+        # A session override takes precedence over the selected agent preset and
+        # survives Limilink restarts. Switching agents clears the override.
+        current_reasoning_effort = get_reasoning_effort_override(session_path)
         if current_reasoning_effort is None:
             current_reasoning_effort = preset.get("reasoning_effort")
 
@@ -530,7 +626,15 @@ async def process_chat(session_id: str, message: str) -> str:
             with open(agent_path, "w") as f:
                 f.write(new_agent)
 
-            # If switching to a pi harness, regenerate models.json for the new preset
+            # Agent presets own their auth/resources and defaults. Reconcile all
+            # of them now rather than waiting for the next subprocess invocation.
+            ensure_session_initialized(
+                session_path, cfg, config_dir, agent_alias=new_agent
+            )
+            if os.path.exists(model_path):
+                os.unlink(model_path)
+            set_reasoning_effort_override(session_path, None)
+
             new_preset = agent_by_alias.get(new_agent, {})
             new_harness_str = new_preset.get("harness", new_agent)
             try:
@@ -540,6 +644,7 @@ async def process_chat(session_id: str, message: str) -> str:
             if new_harness == HarnessType.PI:
                 new_model = new_preset.get("model") or cfg.get("pi_agent_model", "auto")
                 write_pi_models_json(session_path, new_preset, cfg, new_model)
+                write_pi_settings_json(session_path, new_preset.get("reasoning_effort"))
 
             reply = f"Agent switched to: {new_agent}"
             append_to_history(session_path, "bot", reply)
@@ -586,21 +691,9 @@ async def process_chat(session_id: str, message: str) -> str:
                 append_to_history(session_path, "bot", reply)
                 return reply
 
-            # Update in-memory and write settings.json for pi-agent.
-            session_reasoning_effort[safe_session_id] = level
+            set_reasoning_effort_override(session_path, level)
             current_reasoning_effort = level
-            settings_path = os.path.join(session_path, ".pi", "agent", "settings.json")
-            settings = {}
-            if os.path.exists(settings_path):
-                try:
-                    with open(settings_path, "r") as f:
-                        settings = json.load(f)
-                except Exception:
-                    pass
-            settings["defaultThinkingLevel"] = level
-            os.makedirs(os.path.dirname(settings_path), exist_ok=True)
-            with open(settings_path, "w") as f:
-                json.dump(settings, f, indent=2)
+            write_pi_settings_json(session_path, level)
 
             reply = f"Reasoning level set to: {level}"
             append_to_history(session_path, "bot", reply)
@@ -869,12 +962,11 @@ async def process_chat(session_id: str, message: str) -> str:
         if harness == HarnessType.PI:
             pi_agent_dir = os.path.join(session_path, ".pi", "agent")
 
-            # Write models.json and settings.json only if they don't exist yet (first run).
-            # Subsequent changes go through !agent / !model / !reasoning_effort which rewrite them.
-            models_json_path = os.path.join(pi_agent_dir, "models.json")
-            if not os.path.exists(models_json_path):
-                write_pi_models_json(session_path, preset, cfg, current_model)
-            write_pi_settings_json(session_path, preset)
+            # These files are Limilink-managed projections of the active preset.
+            # Synchronize them on every run so config edits and agent switches do
+            # not leave stale provider or thinking defaults behind.
+            write_pi_models_json(session_path, preset, cfg, current_model)
+            write_pi_settings_json(session_path, current_reasoning_effort)
 
             exepath = cfg.get("pi_agent_exepath", "pi-agent")
 
@@ -886,6 +978,10 @@ async def process_chat(session_id: str, message: str) -> str:
             provider_name = preset.get("provider", PI_PROVIDER_NAME)
             agent_args += ["--provider", provider_name]
             agent_args += ["--model", current_model]
+            if current_reasoning_effort:
+                # A continued Pi session restores its recorded thinking level in
+                # preference to defaults, so this must be an explicit CLI option.
+                agent_args += ["--thinking", current_reasoning_effort]
             agent_args += ["--session-dir", ".pi/agent/session"]
             # Specification of --session on the first run of a new session directory
             # causes "No session found matching..." error. pi-agent should just
