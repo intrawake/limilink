@@ -230,24 +230,27 @@ def reconcile_session_symlinks(
                     print(f"Failed to create symlink {link_path}: {e}")
             continue
 
-        if not os.path.islink(link_path):
-            print(f"Refusing to replace non-symlink agent resource: {link_path}")
-            continue
-
-        current_target = _absolute_link_target(link_path)
-        if current_target == desired_target:
-            continue
-        if current_target not in managed_targets:
-            print(f"Refusing to replace unmanaged symlink: {link_path}")
-            continue
+        if os.path.islink(link_path):
+            current_target = _absolute_link_target(link_path)
+            if current_target == desired_target:
+                continue
+            if current_target not in managed_targets:
+                print(f"Refusing to replace unmanaged symlink: {link_path}")
+                continue
 
         try:
             if desired_target is None:
                 os.unlink(link_path)
             else:
+                # os.replace atomically overwrites managed links and regular files.
+                # The latter handles empty auth.json files created by pi-agent.
                 replacement_path = f"{link_path}.limilink-{uuid.uuid4().hex}"
-                os.symlink(desired_target, replacement_path)
-                os.replace(replacement_path, link_path)
+                try:
+                    os.symlink(desired_target, replacement_path)
+                    os.replace(replacement_path, link_path)
+                finally:
+                    if os.path.lexists(replacement_path):
+                        os.unlink(replacement_path)
         except Exception as e:
             print(f"Failed to reconcile symlink {link_path}: {e}")
 
@@ -259,33 +262,29 @@ def ensure_session_initialized(
     agent_alias: str | None = None,
 ):
     init_marker = os.path.join(session_path, ".initialized")
-    first_initialization = not os.path.exists(init_marker)
+    if os.path.exists(init_marker):
+        return
 
-    if first_initialization:
-        # Mark it as a project root so gemini-cli scopes history to this folder.
-        project_root_marker = os.path.join(session_path, ".project_root")
-        if not os.path.exists(project_root_marker):
-            with open(project_root_marker, "a"):
-                pass
+    # Mark it as a project root so gemini-cli scopes history to this folder.
+    project_root_marker = os.path.join(session_path, ".project_root")
+    if not os.path.exists(project_root_marker):
+        with open(project_root_marker, "a"):
+            pass
 
-        workspace_md_rel = cfg.get("gemini_workspace_md")
-        if workspace_md_rel:
-            workspace_md_abs = resolve_config_path(workspace_md_rel, config_dir)
-            if os.path.exists(workspace_md_abs):
-                target_md = os.path.join(session_path, "GEMINI.md")
-                if not os.path.exists(target_md):
-                    shutil.copy2(workspace_md_abs, target_md)
+    workspace_md_rel = cfg.get("gemini_workspace_md")
+    if workspace_md_rel:
+        workspace_md_abs = resolve_config_path(workspace_md_rel, config_dir)
+        if os.path.exists(workspace_md_abs):
+            target_md = os.path.join(session_path, "GEMINI.md")
+            if not os.path.exists(target_md):
+                shutil.copy2(workspace_md_abs, target_md)
 
-        os.makedirs(os.path.join(session_path, "outbox"), exist_ok=True)
-        os.makedirs(os.path.join(session_path, ".pi", "agent"), exist_ok=True)
-
-    # Agent resources are intentionally reconciled even after initialization.
-    # This repairs old default sessions and makes !agent switching effective.
+    os.makedirs(os.path.join(session_path, "outbox"), exist_ok=True)
+    os.makedirs(os.path.join(session_path, ".pi", "agent"), exist_ok=True)
     reconcile_session_symlinks(session_path, cfg, config_dir, agent_alias)
 
-    if first_initialization:
-        with open(init_marker, "a"):
-            pass
+    with open(init_marker, "a"):
+        pass
 
 
 @app.get("/sessions", response_model=SessionListResponse)
@@ -626,11 +625,9 @@ async def process_chat(session_id: str, message: str) -> str:
             with open(agent_path, "w") as f:
                 f.write(new_agent)
 
-            # Agent presets own their auth/resources and defaults. Reconcile all
-            # of them now rather than waiting for the next subprocess invocation.
-            ensure_session_initialized(
-                session_path, cfg, config_dir, agent_alias=new_agent
-            )
+            # Agent presets own their auth/resources and defaults. Reconcile only
+            # when the agent changes, not on every subsequent chat request.
+            reconcile_session_symlinks(session_path, cfg, config_dir, new_agent)
             if os.path.exists(model_path):
                 os.unlink(model_path)
             set_reasoning_effort_override(session_path, None)

@@ -4,7 +4,7 @@ from unittest.mock import patch, AsyncMock, MagicMock
 from fastapi.testclient import TestClient
 import os
 import shutil
-from main import app
+from main import app, ensure_session_initialized, reconcile_session_symlinks
 
 client = TestClient(app)
 
@@ -109,6 +109,103 @@ def test_create_session_initialization(test_sessions_dir):
         assert os.path.exists(test_target_link)
         with open(test_target_link, "r") as f:
             assert f.read().strip() == "This is a test target"
+
+
+def test_initialization_reconciles_symlinks_only_once(tmp_path):
+    session_path = tmp_path / "session"
+    session_path.mkdir()
+    config = {"agent_by_alias": {"pi-test": {"harness": "pi"}}}
+
+    with patch("main.reconcile_session_symlinks") as mock_reconcile:
+        ensure_session_initialized(
+            str(session_path), config, str(tmp_path), agent_alias="pi-test"
+        )
+        ensure_session_initialized(
+            str(session_path), config, str(tmp_path), agent_alias="pi-test"
+        )
+
+    mock_reconcile.assert_called_once_with(
+        str(session_path), config, str(tmp_path), "pi-test"
+    )
+
+
+def _managed_auth_config(first_auth, second_auth):
+    return {
+        "agent_by_alias": {
+            "pi-first": {
+                "session_symlink_dict": {".pi/agent/auth.json": str(first_auth)}
+            },
+            "pi-second": {
+                "session_symlink_dict": {".pi/agent/auth.json": str(second_auth)}
+            },
+        }
+    }
+
+
+def test_reconcile_overwrites_regular_managed_resource(tmp_path):
+    first_auth = tmp_path / "first-auth.json"
+    second_auth = tmp_path / "second-auth.json"
+    first_auth.write_text('{"first": true}')
+    second_auth.write_text('{"second": true}')
+    session_path = tmp_path / "session"
+    auth_path = session_path / ".pi" / "agent" / "auth.json"
+    auth_path.parent.mkdir(parents=True)
+    auth_path.write_text("{}")
+
+    reconcile_session_symlinks(
+        str(session_path),
+        _managed_auth_config(first_auth, second_auth),
+        str(tmp_path),
+        "pi-second",
+    )
+
+    assert auth_path.is_symlink()
+    assert os.path.realpath(auth_path) == str(second_auth)
+
+
+def test_reconcile_replaces_managed_symlink(tmp_path):
+    first_auth = tmp_path / "first-auth.json"
+    second_auth = tmp_path / "second-auth.json"
+    first_auth.write_text("{}")
+    second_auth.write_text("{}")
+    session_path = tmp_path / "session"
+    auth_path = session_path / ".pi" / "agent" / "auth.json"
+    auth_path.parent.mkdir(parents=True)
+    auth_path.symlink_to(first_auth)
+
+    reconcile_session_symlinks(
+        str(session_path),
+        _managed_auth_config(first_auth, second_auth),
+        str(tmp_path),
+        "pi-second",
+    )
+
+    assert auth_path.is_symlink()
+    assert os.path.realpath(auth_path) == str(second_auth)
+
+
+def test_reconcile_preserves_unmanaged_symlink(tmp_path, capsys):
+    first_auth = tmp_path / "first-auth.json"
+    second_auth = tmp_path / "second-auth.json"
+    unmanaged_auth = tmp_path / "unmanaged-auth.json"
+    first_auth.write_text("{}")
+    second_auth.write_text("{}")
+    unmanaged_auth.write_text("{}")
+    session_path = tmp_path / "session"
+    auth_path = session_path / ".pi" / "agent" / "auth.json"
+    auth_path.parent.mkdir(parents=True)
+    auth_path.symlink_to(unmanaged_auth)
+
+    reconcile_session_symlinks(
+        str(session_path),
+        _managed_auth_config(first_auth, second_auth),
+        str(tmp_path),
+        "pi-second",
+    )
+
+    assert auth_path.is_symlink()
+    assert os.path.realpath(auth_path) == str(unmanaged_auth)
+    assert "Refusing to replace unmanaged symlink" in capsys.readouterr().out
 
 
 def test_create_session_with_agent_symlinks(test_sessions_dir):
