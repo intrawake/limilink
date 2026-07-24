@@ -339,6 +339,13 @@ async def create_session(agent: str | None = None):
     with open(agent_path, "w") as f:
         f.write(effective_agent)
 
+    # Persist the resolved model for external tools (diary, etc.)
+    preset = agent_by_alias.get(effective_agent, {})
+    model = preset.get("model") or cfg.get("pi_agent_model", "auto")
+    model_path = os.path.join(session_path, ".model")
+    with open(model_path, "w") as f:
+        f.write(model)
+
     return {"status": "created", "session_id": safe_id}
 
 
@@ -942,6 +949,143 @@ async def process_chat(session_id: str, message: str) -> str:
                     reply = f"Stat failed: {stderr.decode().strip()}"
             except Exception as e:
                 reply = f"Stat error: {e}"
+            append_to_history(session_path, "bot", reply)
+            return reply
+
+        # Handle compact command (pi harness only)
+        stripped_message = message.strip()
+        if stripped_message == "!compact" or stripped_message.startswith("!compact "):
+            append_to_history(session_path, "user", message)
+            if harness != HarnessType.PI:
+                reply = "!compact is only available for the pi harness."
+                append_to_history(session_path, "bot", reply)
+                return reply
+
+            pi_session_dir = os.path.join(session_path, ".pi", "agent", "session")
+            if not os.path.isdir(pi_session_dir) or not any(
+                f.endswith(".jsonl") for f in os.listdir(pi_session_dir)
+            ):
+                reply = "No pi-agent session data found. Send a message first!"
+                append_to_history(session_path, "bot", reply)
+                return reply
+
+            lock = get_session_lock(safe_session_id)
+            if lock.locked():
+                reply = "Session is busy \u2014 wait for the current request to finish."
+                append_to_history(session_path, "bot", reply)
+                return reply
+
+            custom_instructions = None
+            parts = stripped_message.split(maxsplit=1)
+            if len(parts) == 2:
+                custom_instructions = parts[1].strip()
+
+            pi_agent_dir = os.path.join(session_path, ".pi", "agent")
+            write_pi_models_json(session_path, preset, cfg, current_model)
+            write_pi_settings_json(session_path, current_reasoning_effort)
+
+            exepath = cfg.get("pi_agent_exepath", "pi-agent")
+            rpc_args = ["--approve", "--mode", "rpc", "--continue"]
+            provider_name = preset.get("provider", PI_PROVIDER_NAME)
+            rpc_args += ["--provider", provider_name]
+            rpc_args += ["--model", current_model]
+            if current_reasoning_effort:
+                rpc_args += ["--thinking", current_reasoning_effort]
+            rpc_args += ["--session-dir", ".pi/agent/session"]
+
+            rpc_env = os.environ.copy()
+            rpc_env["PI_CODING_AGENT_DIR"] = pi_agent_dir
+            rpc_env["TMPDIR"] = get_session_tmp_dir(session_path)
+            cfg_env = cfg.get("gemini_env", [])
+            if isinstance(cfg_env, list):
+                for env_var in cfg_env:
+                    if (
+                        isinstance(env_var, dict)
+                        and "name" in env_var
+                        and "value" in env_var
+                    ):
+                        rpc_env[env_var["name"]] = env_var["value"]
+            cfg_env_dict = cfg.get("gemini_env_dict", {})
+            if isinstance(cfg_env_dict, dict):
+                for name, value in cfg_env_dict.items():
+                    if isinstance(value, str):
+                        rpc_env[name] = value
+            preset_env_dict = preset.get("env_dict", {})
+            if isinstance(preset_env_dict, dict):
+                for name, value in preset_env_dict.items():
+                    if isinstance(value, str):
+                        rpc_env[name] = value
+            env_overrides_path = os.path.join(session_path, ".env_overrides.json")
+            if os.path.exists(env_overrides_path):
+                try:
+                    with open(env_overrides_path, "r") as f:
+                        for k, v in json.load(f).items():
+                            rpc_env[k] = v
+                except Exception:
+                    pass
+
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    exepath,
+                    *rpc_args,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=session_path,
+                    env=rpc_env,
+                )
+
+                assert process.stdin is not None
+                assert process.stdout is not None
+
+                compact_cmd: dict[str, str] = {"type": "compact"}
+                if custom_instructions:
+                    compact_cmd["customInstructions"] = custom_instructions
+                process.stdin.write((json.dumps(compact_cmd) + "\n").encode())
+                await process.stdin.drain()
+
+                compact_response = None
+                while True:
+                    line = await process.stdout.readline()
+                    if not line:
+                        break
+                    try:
+                        event = json.loads(line.decode())
+                    except json.JSONDecodeError:
+                        continue
+                    if (
+                        event.get("type") == "response"
+                        and event.get("command") == "compact"
+                    ):
+                        compact_response = event
+                        break
+
+                process.stdin.close()
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                await process.wait()
+
+                if compact_response is None:
+                    reply = "Compaction produced no response."
+                elif not compact_response.get("success"):
+                    error = compact_response.get("error", "unknown error")
+                    reply = f"Compaction failed: {error}"
+                else:
+                    data = compact_response.get("data", {})
+                    tokens_before = data.get("tokensBefore", "?")
+                    tokens_after = data.get("estimatedTokensAfter", "?")
+                    summary = data.get("summary", "")
+                    reply = f"\u2705 Compacted: {tokens_before} \u2192 ~{tokens_after} tokens"
+                    if summary:
+                        preview = (
+                            summary[:500] + "\u2026" if len(summary) > 500 else summary
+                        )
+                        reply += f"\n\n{preview}"
+            except Exception as e:
+                reply = f"Compact error: {e}"
+
             append_to_history(session_path, "bot", reply)
             return reply
 
