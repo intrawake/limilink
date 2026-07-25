@@ -1115,7 +1115,11 @@ async def process_chat(session_id: str, message: str) -> str:
             env["PI_CODING_AGENT_DIR"] = pi_agent_dir
 
             # Build pi-agent args
-            agent_args = ["--approve"]
+            is_readonly = preset.get("readonly_mode_on", False)
+            if is_readonly:
+                agent_args = ["--no-tools", "--tools", "read,grep,find,ls"]
+            else:
+                agent_args = ["--approve"]
             provider_name = preset.get("provider", PI_PROVIDER_NAME)
             agent_args += ["--provider", provider_name]
             agent_args += ["--model", current_model]
@@ -1142,16 +1146,17 @@ async def process_chat(session_id: str, message: str) -> str:
             cmd = [exepath] + agent_args + ["--continue", "-p", message]
         else:
             exepath = cfg.get("gemini_exepath", "gemini")
-            args = preset.get("args") or cfg.get(
-                "gemini_args",
-                [
-                    "--approval-mode",
-                    "plan",
-                    "--resume",
-                    "latest",
-                    "-p",
-                ],
-            )
+            # Build args: node wrapper + preset extra args + generated approval.
+            # Preset args are additional, not a replacement — approval flags always apply.
+            args = list(cfg.get("gemini_node_args", []))
+            preset_args = preset.get("args", [])
+            if isinstance(preset_args, list):
+                args += preset_args
+            is_readonly = preset.get("readonly_mode_on", False)
+            if is_readonly:
+                args += ["--approval-mode", "plan"]
+            else:
+                args += ["--yolo"]
 
             # Inject --model into args if not already present or replace it
             if "--model" in args:

@@ -2,15 +2,13 @@
  (gemini-cli
   (harness gemini-cli)
   (model auto)
+  (readonly_mode_on true)
   (session_symlink_dict ()
    (agent_specific_link.txt ./agent_specific_target.txt)
   )
  )
 )
 (gemini_exepath gemini)
-(gemini_args (())
- --approval-mode plan
-)
 (gemini_system_md gemini_cli/SYSTEM.md)
 (gemini_workspace_md gemini_cli/GEMINI.md)
 (session_symlink_dict ()
