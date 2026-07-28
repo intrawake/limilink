@@ -913,13 +913,25 @@ async def process_chat(session_id: str, message: str) -> str:
                 return reply
 
             pi_agent_dir = os.path.join(session_path, ".pi", "agent", "session")
-            jsonl_files = (
-                sorted([f for f in os.listdir(pi_agent_dir) if f.endswith(".jsonl")])
-                if os.path.isdir(pi_agent_dir)
-                else []
-            )
-            if not jsonl_files:
+            if not os.path.isdir(pi_agent_dir):
                 reply = "No pi-agent session data found. Send a message first!"
+                append_to_history(session_path, "bot", reply)
+                return reply
+
+            all_jsonl = [f for f in os.listdir(pi_agent_dir) if f.endswith(".jsonl")]
+
+            # Prefer the "main" session file -- one with a matching sibling
+            # directory (same basename sans .jsonl). Falls back to
+            # alphabetically last to avoid orphaned fork/clone artifacts.
+            def has_sibling_dir(name):
+                return os.path.isdir(
+                    os.path.join(pi_agent_dir, name.removesuffix(".jsonl"))
+                )
+
+            main_candidates = [f for f in all_jsonl if has_sibling_dir(f)]
+            jsonl_files = sorted(main_candidates if main_candidates else all_jsonl)
+            if not jsonl_files:
+                reply = "No usable pi-agent session JSONL found."
                 append_to_history(session_path, "bot", reply)
                 return reply
 
