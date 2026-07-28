@@ -1,7 +1,8 @@
 import os
-import pytest
-import tempfile
 import shutil
+import tempfile
+
+import pytest
 
 # Set a safe default for LIMILINK_SESSIONS_DIR during test discovery and imports.
 # This prevents top-level code from touching the live session directory.

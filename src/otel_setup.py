@@ -1,5 +1,7 @@
-import os
 import logging
+import os
+
+logger = logging.getLogger(__name__)
 
 
 def init_otel(service_name: str, config: dict):
@@ -23,20 +25,29 @@ def init_otel(service_name: str, config: dict):
         os.environ["OTEL_LOGS_EXPORTER"] = "none"
 
     try:
-        from opentelemetry import trace  # type: ignore
-        from opentelemetry._logs import set_logger_provider  # type: ignore
-        from opentelemetry.sdk.resources import Resource  # type: ignore
-        from opentelemetry.sdk.trace import TracerProvider  # type: ignore
-        from opentelemetry.sdk.trace.export import BatchSpanProcessor  # type: ignore
-        from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler  # type: ignore
-        from opentelemetry.sdk._logs.export import BatchLogRecordProcessor  # type: ignore
-        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (  # type: ignore
+        from opentelemetry import trace
+        from opentelemetry._logs import set_logger_provider
+        from opentelemetry.exporter.otlp.proto.http._log_exporter import (
+            OTLPLogExporter,
+        )
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
             OTLPSpanExporter,
         )
-        from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter  # type: ignore
-        from opentelemetry.instrumentation.logging import LoggingInstrumentor  # type: ignore
+        from opentelemetry.instrumentation.logging import (
+            LoggingInstrumentor,
+        )
+        from opentelemetry.sdk._logs import (
+            LoggerProvider,
+            LoggingHandler,
+        )
+        from opentelemetry.sdk._logs.export import (
+            BatchLogRecordProcessor,
+        )
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
     except ImportError:
-        logging.warning("OpenTelemetry not installed. Skipping setup.")
+        logger.warning("OpenTelemetry not installed. Skipping setup.")
         return
 
     resource = Resource.create({"service.name": service_name})

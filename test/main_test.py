@@ -1,9 +1,13 @@
 from __future__ import annotations
-import pytest
-from unittest.mock import patch, AsyncMock, MagicMock
-from fastapi.testclient import TestClient
+
+import aiofiles
 import os
 import shutil
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from fastapi.testclient import TestClient
+
 from main import app, ensure_session_initialized, reconcile_session_symlinks
 
 client = TestClient(app)
@@ -57,13 +61,14 @@ async def test_chat_endpoint_invokes_gemini(mock_exec, test_sessions_dir):
     preset_config_path = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "preset", "config.sxpb")
     )
-    with patch.dict(os.environ, {"LIMILINK_CONFIG": preset_config_path}):
-        # Use TestClient with 'with' block to ensure app startup/shutdown
-        with TestClient(app) as c:
-            response = c.post(
-                "/chat",
-                json={"message": "hello test", "session_id": "test_chat_session"},
-            )
+    with (
+        patch.dict(os.environ, {"LIMILINK_CONFIG": preset_config_path}),
+        TestClient(app) as c,
+    ):
+        response = c.post(
+            "/chat",
+            json={"message": "hello test", "session_id": "test_chat_session"},
+        )
 
     assert response.status_code == 200
     assert response.json() == {"reply": "mocked response from gemini"}
@@ -691,8 +696,8 @@ async def test_session_delete_cleans_tmpdir(mock_exec, test_sessions_dir):
 
         # Create a dummy file in tmp/ to simulate a leaked temp file
         dummy_file = os.path.join(expected_tmpdir, "leaked.log")
-        with open(dummy_file, "w") as f:
-            f.write("should be cleaned up")
+        async with aiofiles.open(dummy_file, "w") as f:
+            await f.write("should be cleaned up")
         assert os.path.exists(dummy_file)
 
         # Delete the session
@@ -729,6 +734,65 @@ async def test_env_vars_dict_only(mock_exec, mock_load_config):
 
     env = mock_exec.call_args[1]["env"]
     assert env["MY_VAR"] == "my_val"
+
+
+@pytest.mark.asyncio
+@patch("main.load_config")
+@patch("main.asyncio.create_subprocess_exec")
+async def test_env_vars_canonical_env_dict(mock_exec, mock_load_config):
+    """The canonical top-level ``env_dict`` is injected (new name)."""
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"mocked response", b"")
+    mock_exec.return_value = mock_process
+
+    mock_load_config.return_value = (
+        {
+            "agent_by_alias": {"gemini-cli": {"harness": "gemini-cli"}},
+            "env_dict": {"MY_VAR": "my_val"},
+        },
+        "/tmp",
+    )
+
+    with TestClient(app) as c:
+        response = c.post(
+            "/chat", json={"message": "hello", "session_id": "test_env_canonical"}
+        )
+        assert response.status_code == 200
+
+    env = mock_exec.call_args[1]["env"]
+    assert env["MY_VAR"] == "my_val"
+
+
+@pytest.mark.asyncio
+@patch("main.load_config")
+@patch("main.asyncio.create_subprocess_exec")
+async def test_env_vars_env_dict_wins_over_deprecated(mock_exec, mock_load_config):
+    """With both set, canonical ``env_dict`` wins and the deprecated
+    ``gemini_env_dict`` is ignored entirely (not merged)."""
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"mocked response", b"")
+    mock_exec.return_value = mock_process
+
+    mock_load_config.return_value = (
+        {
+            "agent_by_alias": {"gemini-cli": {"harness": "gemini-cli"}},
+            "env_dict": {"SHARED": "new"},
+            "gemini_env_dict": {"SHARED": "old", "LEGACY_ONLY": "legacy"},
+        },
+        "/tmp",
+    )
+
+    with TestClient(app) as c:
+        response = c.post(
+            "/chat", json={"message": "hello", "session_id": "test_env_precedence"}
+        )
+        assert response.status_code == 200
+
+    env = mock_exec.call_args[1]["env"]
+    assert env["SHARED"] == "new"
+    assert "LEGACY_ONLY" not in env
 
 
 @pytest.mark.asyncio

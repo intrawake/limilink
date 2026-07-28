@@ -1,10 +1,15 @@
 """Tests for default agent selection and agent_by_alias validation."""
 
 from __future__ import annotations
+
 import os
+from unittest.mock import AsyncMock, patch
+
+import aiofiles
+
 import pytest
-from unittest.mock import patch, AsyncMock
 from fastapi.testclient import TestClient
+
 from main import app
 
 
@@ -197,9 +202,11 @@ def test_default_agent_resources_exist_before_first_chat(tmp_path, test_sessions
         },
     }
 
-    with patch("main.load_config", return_value=(config, str(tmp_path))):
-        with TestClient(app) as c:
-            response = c.post("/sessions")
+    with (
+        patch("main.load_config", return_value=(config, str(tmp_path))),
+        TestClient(app) as c,
+    ):
+        response = c.post("/sessions")
 
     assert response.status_code == 200
     session_path = os.path.join(test_sessions_dir, response.json()["session_id"])
@@ -334,8 +341,8 @@ async def test_models_json_uses_custom_token_limits(
     session_path = os.path.join(test_sessions_dir, session_id)
     models_path = os.path.join(session_path, ".pi", "agent", "models.json")
     assert os.path.exists(models_path)
-    with open(models_path) as f:
-        models = json.load(f)
+    async with aiofiles.open(models_path) as f:
+        models = json.loads(await f.read())
     provider = models["providers"]["default-provider"]
     model = provider["models"][0]
     assert model["contextWindow"] == 200000
@@ -366,8 +373,8 @@ async def test_models_json_omits_limits_for_unknown_provider(
     session_path = os.path.join(test_sessions_dir, session_id)
     models_path = os.path.join(session_path, ".pi", "agent", "models.json")
     assert os.path.exists(models_path)
-    with open(models_path) as f:
-        models = json.load(f)
+    async with aiofiles.open(models_path) as f:
+        models = json.loads(await f.read())
     provider = models["providers"]["default-provider"]
     model = provider["models"][0]
     assert model["id"] == "auto"
@@ -399,8 +406,8 @@ async def test_models_json_named_provider_no_models_array(
     session_path = os.path.join(test_sessions_dir, session_id)
     models_path = os.path.join(session_path, ".pi", "agent", "models.json")
     assert os.path.exists(models_path)
-    with open(models_path) as f:
-        models = json.load(f)
+    async with aiofiles.open(models_path) as f:
+        models = json.loads(await f.read())
     provider = models["providers"]["deepseek"]
     assert "models" not in provider
     assert provider["baseUrl"] == "http://test-host:11435/v1"
@@ -430,8 +437,8 @@ async def test_models_json_named_provider_with_explicit_limits(
     session_path = os.path.join(test_sessions_dir, session_id)
     models_path = os.path.join(session_path, ".pi", "agent", "models.json")
     assert os.path.exists(models_path)
-    with open(models_path) as f:
-        models = json.load(f)
+    async with aiofiles.open(models_path) as f:
+        models = json.loads(await f.read())
     provider = models["providers"]["openai-codex"]
     model = provider["models"][0]
     assert model["id"] == "gpt-5.6-sol"

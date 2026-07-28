@@ -1,6 +1,6 @@
+import importlib.util
 import os
 import sys
-import importlib.util
 from unittest.mock import patch
 
 
@@ -27,9 +27,7 @@ def test_find_session_id_logical_pwd():
 
         def fake_exists(path):
             # Simulate finding .initialized in the parent directory of logical PWD
-            if path == "/fake/logical/workspace/session_123/.initialized":
-                return True
-            return False
+            return path == "/fake/logical/workspace/session_123/.initialized"
 
         mock_exists.side_effect = fake_exists
 
@@ -49,9 +47,7 @@ def test_find_session_id_physical_pwd():
     ):
 
         def fake_exists(path):
-            if path == "/tmp/physical/workspace/session_456/.initialized":
-                return True
-            return False
+            return path == "/tmp/physical/workspace/session_456/.initialized"
 
         mock_exists.side_effect = fake_exists
 
@@ -72,9 +68,7 @@ def test_find_session_id_executable_path():
     ):
 
         def fake_exists(path):
-            if path == "/opt/sessions/session_789/.initialized":
-                return True
-            return False
+            return path == "/opt/sessions/session_789/.initialized"
 
         mock_exists.side_effect = fake_exists
 

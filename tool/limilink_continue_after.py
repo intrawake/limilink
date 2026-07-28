@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-import sys
-import os
-import time
 import argparse
+import os
 import subprocess
+import sys
+import time
 
 
 def notify(message):
@@ -11,10 +11,10 @@ def notify(message):
     tool_dir = os.path.dirname(os.path.abspath(__file__))
     notifyme_path = os.path.join(tool_dir, "notifyme.py")
     if os.path.exists(notifyme_path):
-        subprocess.run([sys.executable, notifyme_path, message])
+        subprocess.run([sys.executable, notifyme_path, message], check=False)
     else:
         # Fallback to PATH
-        subprocess.run(["notifyme", message])
+        subprocess.run(["notifyme", message], check=False)
 
 
 def main():

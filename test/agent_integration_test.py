@@ -1,7 +1,11 @@
 from __future__ import annotations
+
+from unittest.mock import AsyncMock, patch
+
+import aiofiles
 import pytest
-from unittest.mock import patch, AsyncMock
 from fastapi.testclient import TestClient
+
 from main import app
 
 
@@ -103,27 +107,29 @@ async def test_agent_switch_reconciles_pi_resources(tmp_path, test_sessions_dir)
         },
     }
 
-    with patch("main.load_config", return_value=(config, str(tmp_path))):
-        with TestClient(app) as c:
-            create_response = c.post("/sessions?agent=pi-first")
-            session_id = create_response.json()["session_id"]
-            session_path = os.path.join(test_sessions_dir, session_id)
-            c.post(
-                "/chat",
-                json={"message": "!model stale-model", "session_id": session_id},
-            )
-            c.post(
-                "/chat",
-                json={"message": "!reasoning_effort xhigh", "session_id": session_id},
-            )
-            models_path = os.path.join(session_path, ".pi", "agent", "models.json")
-            with open(models_path, "w") as f:
-                json.dump({"providers": {"stale": {}}}, f)
+    with (
+        patch("main.load_config", return_value=(config, str(tmp_path))),
+        TestClient(app) as c,
+    ):
+        create_response = c.post("/sessions?agent=pi-first")
+        session_id = create_response.json()["session_id"]
+        session_path = os.path.join(test_sessions_dir, session_id)
+        c.post(
+            "/chat",
+            json={"message": "!model stale-model", "session_id": session_id},
+        )
+        c.post(
+            "/chat",
+            json={"message": "!reasoning_effort xhigh", "session_id": session_id},
+        )
+        models_path = os.path.join(session_path, ".pi", "agent", "models.json")
+        async with aiofiles.open(models_path, "w") as f:
+            await f.write(json.dumps({"providers": {"stale": {}}}))
 
-            response = c.post(
-                "/chat",
-                json={"message": "!agent pi-second", "session_id": session_id},
-            )
+        response = c.post(
+            "/chat",
+            json={"message": "!agent pi-second", "session_id": session_id},
+        )
 
     assert response.json()["reply"] == "Agent switched to: pi-second"
     auth_link = os.path.join(session_path, ".pi", "agent", "auth.json")
@@ -131,8 +137,11 @@ async def test_agent_switch_reconciles_pi_resources(tmp_path, test_sessions_dir)
     assert not os.path.exists(os.path.join(session_path, ".model"))
     assert not os.path.exists(os.path.join(session_path, ".reasoning_effort"))
     assert not os.path.exists(models_path)
-    with open(os.path.join(session_path, ".pi", "agent", "settings.json")) as f:
-        assert json.load(f)["defaultThinkingLevel"] == "high"
+    async with aiofiles.open(
+        os.path.join(session_path, ".pi", "agent", "settings.json")
+    ) as f:
+        content = await f.read()
+    assert json.loads(content)["defaultThinkingLevel"] == "high"
 
 
 @pytest.mark.asyncio
@@ -336,8 +345,8 @@ async def test_reasoning_effort_set_and_query(
     assert _os.path.exists(settings_path)
     import json as _json
 
-    with open(settings_path) as f:
-        settings = _json.load(f)
+    async with aiofiles.open(settings_path) as f:
+        settings = _json.loads(await f.read())
     assert settings["defaultThinkingLevel"] == "xhigh"
 
 
@@ -412,8 +421,8 @@ async def test_reasoning_effort_in_preset_writes_settings(
     assert _os.path.exists(settings_path)
     import json as _json
 
-    with open(settings_path) as f:
-        settings = _json.load(f)
+    async with aiofiles.open(settings_path) as f:
+        settings = _json.loads(await f.read())
     assert settings["defaultThinkingLevel"] == "high"
 
     cmd = list(mock_exec.call_args[0])
@@ -426,8 +435,8 @@ async def test_write_pi_settings_json_synchronizes_level(
     mock_config, test_sessions_dir
 ):
     """Reasoning synchronization updates its key and preserves other settings."""
-    import os as _os
     import json as _json
+    import os as _os
 
     session_id = "test_settings_sync"
     session_path = _os.path.join(test_sessions_dir, session_id)
@@ -435,38 +444,38 @@ async def test_write_pi_settings_json_synchronizes_level(
     _os.makedirs(settings_dir, exist_ok=True)
 
     settings_path = _os.path.join(settings_dir, "settings.json")
-    with open(settings_path, "w") as f:
-        _json.dump({"defaultThinkingLevel": "low", "theme": "dark"}, f)
+    async with aiofiles.open(settings_path, "w") as f:
+        await f.write(_json.dumps({"defaultThinkingLevel": "low", "theme": "dark"}))
 
     from main import write_pi_settings_json
 
     write_pi_settings_json(session_path, "high")
 
-    with open(settings_path) as f:
-        settings = _json.load(f)
+    async with aiofiles.open(settings_path) as f:
+        settings = _json.loads(await f.read())
     assert settings == {"defaultThinkingLevel": "high", "theme": "dark"}
 
 
 @pytest.mark.asyncio
 async def test_write_pi_settings_json_clears_level(test_sessions_dir):
     """Selecting a preset without reasoning removes the stale default."""
-    import os as _os
     import json as _json
+    import os as _os
 
     session_id = "test_settings_clear"
     session_path = _os.path.join(test_sessions_dir, session_id)
     settings_dir = _os.path.join(session_path, ".pi", "agent")
     _os.makedirs(settings_dir, exist_ok=True)
     settings_path = _os.path.join(settings_dir, "settings.json")
-    with open(settings_path, "w") as f:
-        _json.dump({"defaultThinkingLevel": "high", "theme": "dark"}, f)
+    async with aiofiles.open(settings_path, "w") as f:
+        await f.write(_json.dumps({"defaultThinkingLevel": "high", "theme": "dark"}))
 
     from main import write_pi_settings_json
 
     write_pi_settings_json(session_path, None)
 
-    with open(settings_path) as f:
-        assert _json.load(f) == {"theme": "dark"}
+    async with aiofiles.open(settings_path) as f:
+        assert _json.loads(await f.read()) == {"theme": "dark"}
 
 
 @pytest.mark.asyncio
@@ -482,10 +491,10 @@ async def test_stat_pi_with_data(mock_exec, mock_config, test_sessions_dir):
 
     # Mark session as pi-agent and create dummy jsonl
     _os.makedirs(session_path, exist_ok=True)
-    with open(_os.path.join(session_path, ".agent_type"), "w") as f:
-        f.write("pi-agent")
-    with open(_os.path.join(pi_agent_dir, "test.jsonl"), "w") as f:
-        f.write('{"type":"session","cwd":"/test"}\n')
+    async with aiofiles.open(_os.path.join(session_path, ".agent_type"), "w") as f:
+        await f.write("pi-agent")
+    async with aiofiles.open(_os.path.join(pi_agent_dir, "test.jsonl"), "w") as f:
+        await f.write('{"type":"session","cwd":"/test"}\n')
 
     # Mock the stat subprocess (called by !stat, not the LLM)
     stat_process = AsyncMock()
@@ -582,11 +591,11 @@ async def test_trace_pi_with_data(mock_exec, mock_config, test_sessions_dir):
     session_path = _os.path.join(test_sessions_dir, session_id)
     pi_session_dir = _os.path.join(session_path, ".pi", "agent", "session")
     _os.makedirs(pi_session_dir, exist_ok=True)
-    with open(_os.path.join(session_path, ".agent_type"), "w") as output:
-        output.write("pi-agent")
+    async with aiofiles.open(_os.path.join(session_path, ".agent_type"), "w") as output:
+        await output.write("pi-agent")
     jsonl_path = _os.path.join(pi_session_dir, "test.jsonl")
-    with open(jsonl_path, "w") as output:
-        output.write('{"type":"session","cwd":"/test"}\n')
+    async with aiofiles.open(jsonl_path, "w") as output:
+        await output.write('{"type":"session","cwd":"/test"}\n')
 
     trace_process = AsyncMock()
     trace_process.returncode = 0

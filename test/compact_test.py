@@ -1,11 +1,14 @@
 from __future__ import annotations
-import pytest
+
+import aiofiles
 import json
 import os
-from unittest.mock import patch, AsyncMock, MagicMock
-import httpx
-from main import app, get_session_lock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+import pytest
+
+from main import app, get_session_lock
 
 PI_CONFIG = {
     "agent_by_alias": {
@@ -65,8 +68,8 @@ async def test_compact_rejects_non_pi_harness(test_sessions_dir):
     session_id = "test_compact_gemini"
     session_path = os.path.join(test_sessions_dir, session_id)
     os.makedirs(session_path, exist_ok=True)
-    with open(os.path.join(session_path, ".agent_type"), "w") as f:
-        f.write("gemini-test")
+    async with aiofiles.open(os.path.join(session_path, ".agent_type"), "w") as f:
+        await f.write("gemini-test")
 
     with patch("main.load_config", return_value=(GEMINI_CONFIG, "/test")):
         transport = httpx.ASGITransport(app=app)
@@ -84,8 +87,8 @@ async def test_compact_no_session_data(test_sessions_dir):
     session_id = "test_compact_nodata"
     session_path = os.path.join(test_sessions_dir, session_id)
     os.makedirs(session_path, exist_ok=True)
-    with open(os.path.join(session_path, ".agent_type"), "w") as f:
-        f.write("pi-test")
+    async with aiofiles.open(os.path.join(session_path, ".agent_type"), "w") as f:
+        await f.write("pi-test")
 
     with patch("main.load_config", return_value=(PI_CONFIG, "/test")):
         transport = httpx.ASGITransport(app=app)

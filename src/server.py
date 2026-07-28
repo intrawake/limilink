@@ -1,14 +1,15 @@
 import argparse
-import uvicorn
-import sys
+import atexit
+import logging
 import os
 import shutil
-import atexit
 import signal
-import logging
-from main import load_config, get_sessions_dir
+import sys
+
+import uvicorn
+
 import otel_setup
-from main import app
+from main import app, get_sessions_dir, load_config
 
 
 class EndpointFilter(logging.Filter):
@@ -30,7 +31,7 @@ def main():
         default=os.path.join(xdg_config_dirpath, "limilink", "config.sxpb"),
         help="Path to config.sxpb",
     )
-    args, unknown = parser.parse_known_args()
+    args, _ = parser.parse_known_args()
 
     os.environ["LIMILINK_CONFIG"] = args.config
 
@@ -39,7 +40,9 @@ def main():
     otel_setup.init_otel("limilink-server", cfg)
     if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
         try:
-            from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor  # type: ignore
+            from opentelemetry.instrumentation.fastapi import (
+                FastAPIInstrumentor,
+            )
 
             FastAPIInstrumentor.instrument_app(app)
         except ImportError:

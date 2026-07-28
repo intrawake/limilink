@@ -56,6 +56,7 @@ def context_window_from_pi(pi_agent_dir, provider, model_id):
             text=True,
             timeout=5,
             env=env,
+            check=False,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return None

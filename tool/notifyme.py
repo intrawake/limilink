@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-import sys
-import os
-import json
-import urllib.request
 import argparse
+import json
+import os
+import sys
+import urllib.request
 
 
 def load_config():

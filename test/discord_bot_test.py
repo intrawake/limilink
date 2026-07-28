@@ -1,10 +1,10 @@
-import os
+import asyncio
 import json
+import os
 import shutil
 import tempfile
 import unittest
-from unittest.mock import patch, MagicMock, AsyncMock
-import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Mock discord BEFORE importing the bot
 mock_client = MagicMock()
@@ -138,7 +138,7 @@ class TestDiscordBot(unittest.TestCase):
 
         mock_response = MagicMock()
         mock_response.status_code = 500
-        mock_response.json.return_value = {"detail": "Gemini CLI failed: some error"}
+        mock_response.json.return_value = {"detail": "Agent harness failed: some error"}
 
         mock_error = db.httpx.HTTPStatusError(
             message="Server Error", request=MagicMock(), response=mock_response
@@ -154,10 +154,10 @@ class TestDiscordBot(unittest.TestCase):
 
             found_error_msg = False
             for call in mock_message.channel.send.call_args_list:
-                args, kwargs = call
+                args, _ = call
                 if (
                     len(args) > 0
-                    and "⚠️ **Error 500**: Gemini CLI failed: some error" in args[0]
+                    and "⚠️ **Error 500**: Agent harness failed: some error" in args[0]
                 ):
                     found_error_msg = True
             self.assertTrue(found_error_msg)

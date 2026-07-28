@@ -1,8 +1,11 @@
 from __future__ import annotations
+
+import json
 import os
 import time
-import json
+
 from fastapi.testclient import TestClient
+
 from main import app
 
 client = TestClient(app)
@@ -122,10 +125,10 @@ def test_gc_skips_active_sessions(test_sessions_dir, monkeypatch):
     os.utime(sess_path, (old_time, old_time))
 
     # Simulate the session having an active process
-    import main
-
     # Use a mock object as running process entry
     from unittest.mock import AsyncMock
+
+    import main
 
     main.running_processes[sid] = AsyncMock()  # type: ignore[assignment]
 

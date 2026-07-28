@@ -12,7 +12,8 @@ dependencies = [
     "fastapi>=0.111.0",
     "uvicorn>=0.29.0",
     "httpx2>=2.5.0",
-    "sxpb @ git+https://github.com/sxproto/sxpb-py.git@3a84ab22bec2d10734f7eb6dba8ffce09eb1a650",
+    "sxpb @ git+https://github.com/sxproto/sxpb-py.git@539ea1b3fde70abe6c1c2f5188290e51a577d204",
+    "aiofiles>=25.1.0",
 ]
 
 [project.optional-dependencies]
@@ -39,8 +40,8 @@ dev = [
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "respx>=0.22.0",
-    "ruff",
-    "ty",
+    "ruff==0.15.22",
+    "ty==0.0.64",
 ]
 
 [tool.pytest.ini_options]

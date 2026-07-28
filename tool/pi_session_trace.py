@@ -14,9 +14,10 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 DEFAULT_COUNT = 10
 MAX_COUNT = 100

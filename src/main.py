@@ -1,27 +1,33 @@
 from __future__ import annotations
+
+import aiofiles
+import asyncio
+import json
+import logging
 import os
 import re
 import shutil
-import subprocess
-import asyncio
-import json
 import signal
-import logging
+import subprocess
 import time
 import uuid
-from typing import Any
 from enum import Enum
+from typing import Any
+
 import sxpb
 
 try:
-    from opentelemetry import trace  # type: ignore
+    from opentelemetry import trace
 
     tracer = trace.get_tracer("limilink")
 except ImportError:
     tracer = None
+
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -39,7 +45,7 @@ class HarnessType(str, Enum):
         raise ValueError(f"Unsupported harness type: {value}")
 
 
-# Global tracker for running Gemini CLI processes (session_id -> process)
+# Global tracker for running agent harness processes (session_id -> process)
 running_processes: dict[str, asyncio.subprocess.Process] = {}
 session_locks: dict[str, asyncio.Lock] = {}
 
@@ -97,6 +103,31 @@ def load_config() -> tuple[dict[Any, Any], str]:
         return config_data, config_dirpath
 
 
+def global_env_dict(cfg: dict[Any, Any]) -> dict[str, str]:
+    """Resolve the global environment shared by every spawned agent.
+
+    Merges the list-form ``gemini_env`` with the dict-form env, the dict form
+    winning on conflict. The dict form is read from the canonical top-level
+    ``env_dict`` (mirroring each agent preset's own ``env_dict``), falling back
+    to the deprecated ``gemini_env_dict`` — a name that predates these vars
+    being applied to pi agents as well.
+    """
+    env: dict[str, str] = {}
+    cfg_env = cfg.get("gemini_env", [])
+    if isinstance(cfg_env, list):
+        for env_var in cfg_env:
+            if isinstance(env_var, dict) and "name" in env_var and "value" in env_var:
+                env[env_var["name"]] = env_var["value"]
+    cfg_env_dict = cfg.get("env_dict")
+    if not isinstance(cfg_env_dict, dict):
+        cfg_env_dict = cfg.get("gemini_env_dict", {})
+    if isinstance(cfg_env_dict, dict):
+        for name, value in cfg_env_dict.items():
+            if isinstance(value, str):
+                env[name] = value
+    return env
+
+
 def get_sessions_dir(cfg: dict[Any, Any], config_dir: str) -> str:
     env_sessions_dir = os.environ.get("LIMILINK_SESSIONS_DIR")
     if env_sessions_dir:
@@ -143,7 +174,7 @@ def dequeue_unread_messages(session_path: str) -> list[str]:
             os.remove(unread_path)
             return messages
     except Exception:
-        pass
+        logger.debug("Failed to mark message as read", exc_info=True)
     return []
 
 
@@ -336,15 +367,15 @@ async def create_session(agent: str | None = None):
     )
 
     agent_path = os.path.join(session_path, ".agent_type")
-    with open(agent_path, "w") as f:
-        f.write(effective_agent)
+    async with aiofiles.open(agent_path, "w") as f:
+        await f.write(effective_agent)
 
     # Persist the resolved model for external tools (diary, etc.)
     preset = agent_by_alias.get(effective_agent, {})
     model = preset.get("model") or cfg.get("pi_agent_model", "auto")
     model_path = os.path.join(session_path, ".model")
-    with open(model_path, "w") as f:
-        f.write(model)
+    async with aiofiles.open(model_path, "w") as f:
+        await f.write(model)
 
     return {"status": "created", "session_id": safe_id}
 
@@ -546,11 +577,11 @@ async def process_chat(session_id: str, message: str) -> str:
 
         agent_path = os.path.join(session_path, ".agent_type")
         if os.path.exists(agent_path):
-            with open(agent_path, "r") as f:
-                agent_alias = f.read().strip()
+            async with aiofiles.open(agent_path, "r") as f:
+                agent_alias = (await f.read()).strip()
         else:
             # Default to the first agent defined in the config
-            agent_alias = list(agent_by_alias.keys())[0]
+            agent_alias = next(iter(agent_by_alias))
 
         # Ensure session initialized (with agent-specific symlinks if known)
         ensure_session_initialized(
@@ -572,8 +603,8 @@ async def process_chat(session_id: str, message: str) -> str:
         model_path = os.path.join(session_path, ".model")
         current_model = None
         if os.path.exists(model_path):
-            with open(model_path, "r") as f:
-                current_model = f.read().strip()
+            async with aiofiles.open(model_path, "r") as f:
+                current_model = (await f.read()).strip()
 
         if not current_model:
             if preset.get("model"):
@@ -597,11 +628,11 @@ async def process_chat(session_id: str, message: str) -> str:
                 try:
                     # Kill the whole process group to ensure sub-commands are stopped
                     os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                    reply = "Gemini CLI process stopped."
+                    reply = "Agent process stopped."
                 except Exception as e:
                     reply = f"Failed to stop process: {e}"
             else:
-                reply = "No active Gemini CLI process found for this session."
+                reply = "No active agent process found for this session."
             append_to_history(session_path, "bot", reply)
             return reply
 
@@ -612,10 +643,10 @@ async def process_chat(session_id: str, message: str) -> str:
             agent_path = os.path.join(session_path, ".agent_type")
             if len(parts) == 1:
                 # Default to the first agent defined in the config
-                current_agent_str = list(agent_by_alias.keys())[0]
+                current_agent_str = next(iter(agent_by_alias))
                 if os.path.exists(agent_path):
-                    with open(agent_path, "r") as f:
-                        current_agent_str = f.read().strip()
+                    async with aiofiles.open(agent_path, "r") as f:
+                        current_agent_str = (await f.read()).strip()
                 reply = f"Current agent: {current_agent_str}"
                 append_to_history(session_path, "bot", reply)
                 return reply
@@ -629,8 +660,8 @@ async def process_chat(session_id: str, message: str) -> str:
                 reply = f"Invalid agent. Supported aliases or harnesses: {', '.join(valid_agents)}"
                 append_to_history(session_path, "bot", reply)
                 return reply
-            with open(agent_path, "w") as f:
-                f.write(new_agent)
+            async with aiofiles.open(agent_path, "w") as f:
+                await f.write(new_agent)
 
             # Agent presets own their auth/resources and defaults. Reconcile only
             # when the agent changes, not on every subsequent chat request.
@@ -663,8 +694,8 @@ async def process_chat(session_id: str, message: str) -> str:
                 append_to_history(session_path, "bot", reply)
                 return reply
             new_model = parts[1].strip()
-            with open(model_path, "w") as f:
-                f.write(new_model)
+            async with aiofiles.open(model_path, "w") as f:
+                await f.write(new_model)
 
             # If current harness is pi, regenerate models.json with the new model
             if harness == HarnessType.PI:
@@ -712,10 +743,13 @@ async def process_chat(session_id: str, message: str) -> str:
             env_overrides = {}
             if os.path.exists(env_overrides_path):
                 try:
-                    with open(env_overrides_path, "r") as f:
-                        env_overrides = json.load(f)
+                    async with aiofiles.open(env_overrides_path, "r") as f:
+                        content = await f.read()
+                        env_overrides = json.loads(content)
                 except Exception:
-                    pass
+                    logger.debug(
+                        "Failed to load env_overrides, using empty", exc_info=True
+                    )
 
             if len(parts) == 1:
                 reply = "Usage: !env <VAR_NAME> [VALUE]"
@@ -726,21 +760,7 @@ async def process_chat(session_id: str, message: str) -> str:
             if len(parts) == 2:
                 # To show the current value, we need to build the base env
                 env = os.environ.copy()
-                cfg_env = cfg.get("gemini_env", [])
-                if isinstance(cfg_env, list):
-                    for env_var in cfg_env:
-                        if (
-                            isinstance(env_var, dict)
-                            and "name" in env_var
-                            and "value" in env_var
-                        ):
-                            env[env_var["name"]] = env_var["value"]
-                cfg_env_dict = cfg.get("gemini_env_dict", {})
-                if isinstance(cfg_env_dict, dict):
-                    for name, value in cfg_env_dict.items():
-                        if isinstance(value, str):
-                            env[name] = value
-
+                env.update(global_env_dict(cfg))
                 env.update(env_overrides)
                 current_val = env.get(var_name)
 
@@ -753,8 +773,8 @@ async def process_chat(session_id: str, message: str) -> str:
 
             var_value = parts[2]
             env_overrides[var_name] = var_value
-            with open(env_overrides_path, "w") as f:
-                json.dump(env_overrides, f)
+            async with aiofiles.open(env_overrides_path, "w") as f:
+                await f.write(json.dumps(env_overrides))
             reply = f"Environment variable {var_name} set to: {var_value}"
             append_to_history(session_path, "bot", reply)
             return reply
@@ -1008,20 +1028,7 @@ async def process_chat(session_id: str, message: str) -> str:
             rpc_env = os.environ.copy()
             rpc_env["PI_CODING_AGENT_DIR"] = pi_agent_dir
             rpc_env["TMPDIR"] = get_session_tmp_dir(session_path)
-            cfg_env = cfg.get("gemini_env", [])
-            if isinstance(cfg_env, list):
-                for env_var in cfg_env:
-                    if (
-                        isinstance(env_var, dict)
-                        and "name" in env_var
-                        and "value" in env_var
-                    ):
-                        rpc_env[env_var["name"]] = env_var["value"]
-            cfg_env_dict = cfg.get("gemini_env_dict", {})
-            if isinstance(cfg_env_dict, dict):
-                for name, value in cfg_env_dict.items():
-                    if isinstance(value, str):
-                        rpc_env[name] = value
+            rpc_env.update(global_env_dict(cfg))
             preset_env_dict = preset.get("env_dict", {})
             if isinstance(preset_env_dict, dict):
                 for name, value in preset_env_dict.items():
@@ -1030,11 +1037,13 @@ async def process_chat(session_id: str, message: str) -> str:
             env_overrides_path = os.path.join(session_path, ".env_overrides.json")
             if os.path.exists(env_overrides_path):
                 try:
-                    with open(env_overrides_path, "r") as f:
-                        for k, v in json.load(f).items():
+                    async with aiofiles.open(env_overrides_path, "r") as f:
+                        for k, v in json.loads(await f.read()).items():
                             rpc_env[k] = v
                 except Exception:
-                    pass
+                    logger.debug(
+                        "Failed to load rpc env_overrides, using empty", exc_info=True
+                    )
 
             try:
                 process = await asyncio.create_subprocess_exec(
@@ -1187,23 +1196,8 @@ async def process_chat(session_id: str, message: str) -> str:
 
             cmd = [exepath] + args + ["-p", message]
 
-        # Add configured environment variables (list format)
-        cfg_env = cfg.get("gemini_env", [])
-        if isinstance(cfg_env, list):
-            for env_var in cfg_env:
-                if (
-                    isinstance(env_var, dict)
-                    and "name" in env_var
-                    and "value" in env_var
-                ):
-                    env[env_var["name"]] = env_var["value"]
-
-        # Add configured environment variables (dict format)
-        cfg_env_dict = cfg.get("gemini_env_dict", {})
-        if isinstance(cfg_env_dict, dict):
-            for name, value in cfg_env_dict.items():
-                if isinstance(value, str):
-                    env[name] = value
+        # Add configured global environment variables (shared by all agents)
+        env.update(global_env_dict(cfg))
 
         # Merge preset env_dict if present
         preset_env_dict = preset.get("env_dict", {})
@@ -1235,12 +1229,14 @@ async def process_chat(session_id: str, message: str) -> str:
         env_overrides_path = os.path.join(session_path, ".env_overrides.json")
         if os.path.exists(env_overrides_path):
             try:
-                with open(env_overrides_path, "r") as f:
-                    env_overrides = json.load(f)
+                async with aiofiles.open(env_overrides_path, "r") as f:
+                    env_overrides = json.loads(await f.read())
                 for k, v in env_overrides.items():
                     env[k] = v
             except Exception:
-                pass
+                logger.debug(
+                    "Failed to apply env_overrides, continuing without", exc_info=True
+                )
 
         # Append user message to history
         append_to_history(session_path, "user", message)
@@ -1317,7 +1313,7 @@ async def process_chat(session_id: str, message: str) -> str:
                     continue
 
                 # If we reach here, it failed after max attempts
-                print(f"Gemini CLI Error: {error_msg}")
+                print(f"Agent harness error: {error_msg}")
                 # Propagate common status codes (mapped to retcode % 256)
                 # 173 = 429 % 256
                 if (
@@ -1339,7 +1335,7 @@ async def process_chat(session_id: str, message: str) -> str:
                         detail=f"Authentication error: {error_msg}",
                     )
                 raise HTTPException(
-                    status_code=500, detail=f"Gemini CLI failed: {error_msg}"
+                    status_code=500, detail=f"Agent harness failed: {error_msg}"
                 )
 
         # Append bot reply to history
@@ -1350,7 +1346,7 @@ async def process_chat(session_id: str, message: str) -> str:
     except HTTPException:
         raise
     except Exception as e:
-        logging.error(f"Internal error: {e}")
+        logger.error(f"Internal error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1362,7 +1358,7 @@ async def chat_endpoint(request: ChatRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logging.error(f"Internal error: {e}")
+        logger.error(f"Internal error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1382,7 +1378,7 @@ async def run_notifyme_task(session_id: str, message: str):
         # Always deliver the raw notification immediately.
         enqueue_unread_message(session_path, message)
     except Exception as e:
-        logging.error(f"Notifyme enqueue failed for {session_id}: {e}")
+        logger.error(f"Notifyme enqueue failed for {session_id}: {e}")
         return
 
     # Try to get an agent response, but skip if the session is busy.
@@ -1395,14 +1391,16 @@ async def run_notifyme_task(session_id: str, message: str):
         reply_text = await process_chat(session_id, message)
         enqueue_unread_message(session_path, reply_text)
     except Exception as e:
-        logging.error(f"Notifyme agent response failed for {session_id}: {e}")
+        logger.error(f"Notifyme agent response failed for {session_id}: {e}")
         try:
             error_msg = str(e)
             if isinstance(e, HTTPException):
                 error_msg = f"Error {e.status_code}: {e.detail}"
             enqueue_unread_message(session_path, f"❌ Chat failed: {error_msg}")
         except Exception:
-            pass
+            logger.debug(
+                "Failed to enqueue error notification, dropping", exc_info=True
+            )
 
 
 @app.post("/sessions/{session_id}/notifyme")

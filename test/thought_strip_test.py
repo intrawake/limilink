@@ -1,7 +1,9 @@
-from fastapi.testclient import TestClient
-from main import app
-from unittest.mock import patch, AsyncMock
+from unittest.mock import AsyncMock, patch
+
 import pytest
+from fastapi.testclient import TestClient
+
+from main import app
 
 
 @pytest.mark.asyncio

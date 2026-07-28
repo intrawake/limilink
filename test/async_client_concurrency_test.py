@@ -1,8 +1,10 @@
-import pytest
 import asyncio
-from httpx import AsyncClient, ASGITransport
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+
 from main import app
-from unittest.mock import patch, AsyncMock
 
 
 @pytest.mark.asyncio
@@ -30,7 +32,7 @@ async def test_concurrency_lock():
             )
 
             start_time = asyncio.get_event_loop().time()
-            res1, res2 = await asyncio.gather(req1, req2)
+            _, _ = await asyncio.gather(req1, req2)
             end_time = asyncio.get_event_loop().time()
 
             # Since they are serialized, it should take at least 1 second total.

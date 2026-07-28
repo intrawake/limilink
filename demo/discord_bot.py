@@ -1,15 +1,19 @@
-import discord
-from discord.ext import tasks
-import os
-import httpx2 as httpx
-import json
-import tempfile
 import atexit
+import json
+import logging
+import os
 import signal
 import sys
-import logging
-from main import load_config, get_sessions_dir
+import tempfile
+
+import discord
+import httpx2 as httpx
+from discord.ext import tasks
+
 import otel_setup
+from main import get_sessions_dir, load_config
+
+logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
 
@@ -18,7 +22,9 @@ cfg, config_dir = load_config()
 otel_setup.init_otel("limilink-discord", cfg)
 if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
     try:
-        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor  # type: ignore
+        from opentelemetry.instrumentation.httpx import (
+            HTTPXClientInstrumentor,
+        )
 
         HTTPXClientInstrumentor().instrument()
     except ImportError:
@@ -121,7 +127,7 @@ async def send_limilink_reply(channel, reply_text, session_id):
         try:
             os.remove(p)
         except Exception:
-            pass
+            logger.debug("Failed to remove file %s", p, exc_info=True)
 
 
 @tasks.loop(seconds=10.0)
@@ -139,12 +145,12 @@ async def poll_notifyme():
                         if channel:
                             await send_limilink_reply(channel, msg, session_id)
                         else:
-                            logging.warning(
+                            logger.warning(
                                 f"poll_notifyme: channel {channel_id_str} not in cache, "
                                 f"dropping notification for session {session_id}"
                             )
         except Exception:
-            logging.debug("poll_notifyme error", exc_info=True)
+            logger.debug("poll_notifyme error", exc_info=True)
 
 
 @client.event
@@ -234,7 +240,7 @@ async def on_message(message):
 
 if __name__ == "__main__":
     if TOKEN is None:
-        logging.error(
+        logger.error(
             "Error: DISCORD_BOT_TOKEN environment variable or discord_bot_token in config.sxpb not set."
         )
         sys.exit(1)

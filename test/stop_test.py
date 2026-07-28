@@ -1,8 +1,10 @@
-import pytest
-from unittest.mock import patch, AsyncMock
-import signal
 import asyncio
+import signal
+from unittest.mock import AsyncMock, patch
+
 import httpx
+import pytest
+
 from main import app, running_processes
 
 
@@ -48,7 +50,7 @@ async def test_stop_command_logic():
             )
 
             assert stop_response.status_code == 200
-            assert stop_response.json()["reply"] == "Gemini CLI process stopped."
+            assert stop_response.json()["reply"] == "Agent process stopped."
 
             # Verify killpg was called with the right PGID
             mock_killpg.assert_called_once_with(54321, signal.SIGKILL)
@@ -77,5 +79,5 @@ async def test_stop_command_no_process():
         assert response.status_code == 200
         assert (
             response.json()["reply"]
-            == "No active Gemini CLI process found for this session."
+            == "No active agent process found for this session."
         )
