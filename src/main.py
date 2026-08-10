@@ -104,23 +104,9 @@ def load_config() -> tuple[dict[Any, Any], str]:
 
 
 def global_env_dict(cfg: dict[Any, Any]) -> dict[str, str]:
-    """Resolve the global environment shared by every spawned agent.
-
-    Merges the list-form ``gemini_env`` with the dict-form env, the dict form
-    winning on conflict. The dict form is read from the canonical top-level
-    ``env_dict`` (mirroring each agent preset's own ``env_dict``), falling back
-    to the deprecated ``gemini_env_dict`` — a name that predates these vars
-    being applied to pi agents as well.
-    """
+    """Resolve the global environment shared by every spawned agent."""
     env: dict[str, str] = {}
-    cfg_env = cfg.get("gemini_env", [])
-    if isinstance(cfg_env, list):
-        for env_var in cfg_env:
-            if isinstance(env_var, dict) and "name" in env_var and "value" in env_var:
-                env[env_var["name"]] = env_var["value"]
-    cfg_env_dict = cfg.get("env_dict")
-    if not isinstance(cfg_env_dict, dict):
-        cfg_env_dict = cfg.get("gemini_env_dict", {})
+    cfg_env_dict = cfg.get("env_dict", {})
     if isinstance(cfg_env_dict, dict):
         for name, value in cfg_env_dict.items():
             if isinstance(value, str):
@@ -442,8 +428,6 @@ async def get_session_history(session_id: str):
     return {"history": load_session_history(session_path)}
 
 
-PI_PROVIDER_NAME = "default-provider"
-
 VALID_REASONING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 
@@ -491,67 +475,6 @@ def write_pi_settings_json(session_path: str, reasoning_effort: str | None):
     os.makedirs(os.path.dirname(settings_path), exist_ok=True)
     with open(settings_path, "w") as f:
         json.dump(settings, f, indent=2)
-
-
-def write_pi_models_json(
-    session_path: str,
-    preset: dict[Any, Any],
-    cfg: dict[Any, Any],
-    model: str,
-):
-    """Write models.json for a pi-agent session based on the given preset and model.
-
-    When a provider other than default-provider is configured without
-    explicit token limits, the models array is omitted so pi-agent
-    uses its built-in model definitions.  For default-provider (which
-    limilink invents) a model entry is always written, but limits are
-    included only when explicitly set in the preset.
-    """
-    models_json_path = os.path.join(session_path, ".pi", "agent", "models.json")
-    pi_base_url = preset.get("openai_base_url") or cfg.get("pi_agent_openai_base_url")
-    pi_api_key = preset.get("openai_api_key") or cfg.get("pi_agent_openai_api_key")
-    if not pi_base_url or not pi_api_key:
-        # Auth-backed built-in providers need no custom registry. Remove a
-        # generated file left behind by the previous agent instead of letting it
-        # silently influence the new one.
-        if os.path.exists(models_json_path):
-            os.unlink(models_json_path)
-        return
-    provider_name = preset.get("provider", PI_PROVIDER_NAME)
-
-    provider_config: dict[str, Any] = {
-        "baseUrl": pi_base_url,
-        "apiKey": pi_api_key,
-        "api": preset.get("provider_api")
-        or cfg.get("pi_agent_provider_api", "openai-completions"),
-    }
-
-    has_explicit_limits = "token_ctx_limit" in preset or "token_gen_limit" in preset
-
-    # Skip models array when a provider is specified without limits —
-    # pi-agent already knows its own models. Only default-provider
-    # (which limilink invents) needs a model entry since pi-agent
-    # has no built-in models for it.
-    if has_explicit_limits or provider_name == PI_PROVIDER_NAME:
-        model_entry: dict[str, Any] = {
-            "id": model,
-            "name": model,
-            "input": ["text"],
-        }
-        if "token_ctx_limit" in preset:
-            model_entry["contextWindow"] = int(preset["token_ctx_limit"])
-        if "token_gen_limit" in preset:
-            model_entry["maxTokens"] = int(preset["token_gen_limit"])
-        provider_config["models"] = [model_entry]
-
-    models_config = {
-        "providers": {
-            provider_name: provider_config,
-        }
-    }
-    os.makedirs(os.path.dirname(models_json_path), exist_ok=True)
-    with open(models_json_path, "w") as f:
-        json.dump(models_config, f, indent=2)
 
 
 async def process_chat(session_id: str, message: str) -> str:
@@ -677,8 +600,6 @@ async def process_chat(session_id: str, message: str) -> str:
             except ValueError:
                 new_harness = HarnessType.GEMINI_CLI
             if new_harness == HarnessType.PI:
-                new_model = new_preset.get("model") or cfg.get("pi_agent_model", "auto")
-                write_pi_models_json(session_path, new_preset, cfg, new_model)
                 write_pi_settings_json(session_path, new_preset.get("reasoning_effort"))
 
             reply = f"Agent switched to: {new_agent}"
@@ -696,10 +617,6 @@ async def process_chat(session_id: str, message: str) -> str:
             new_model = parts[1].strip()
             async with aiofiles.open(model_path, "w") as f:
                 await f.write(new_model)
-
-            # If current harness is pi, regenerate models.json with the new model
-            if harness == HarnessType.PI:
-                write_pi_models_json(session_path, preset, cfg, new_model)
 
             reply = f"Model switched to: {new_model}"
             append_to_history(session_path, "bot", reply)
@@ -1013,13 +930,13 @@ async def process_chat(session_id: str, message: str) -> str:
                 custom_instructions = parts[1].strip()
 
             pi_agent_dir = os.path.join(session_path, ".pi", "agent")
-            write_pi_models_json(session_path, preset, cfg, current_model)
             write_pi_settings_json(session_path, current_reasoning_effort)
 
             exepath = cfg.get("pi_agent_exepath", "pi-agent")
             rpc_args = ["--approve", "--mode", "rpc", "--continue"]
-            provider_name = preset.get("provider", PI_PROVIDER_NAME)
-            rpc_args += ["--provider", provider_name]
+            provider_name = preset.get("provider")
+            if provider_name:
+                rpc_args += ["--provider", provider_name]
             rpc_args += ["--model", current_model]
             if current_reasoning_effort:
                 rpc_args += ["--thinking", current_reasoning_effort]
@@ -1124,10 +1041,8 @@ async def process_chat(session_id: str, message: str) -> str:
         if harness == HarnessType.PI:
             pi_agent_dir = os.path.join(session_path, ".pi", "agent")
 
-            # These files are Limilink-managed projections of the active preset.
-            # Synchronize them on every run so config edits and agent switches do
-            # not leave stale provider or thinking defaults behind.
-            write_pi_models_json(session_path, preset, cfg, current_model)
+            # Synchronize Limilink's thinking default while preserving other Pi
+            # settings. Provider and model metadata remain user-owned resources.
             write_pi_settings_json(session_path, current_reasoning_effort)
 
             exepath = cfg.get("pi_agent_exepath", "pi-agent")
@@ -1141,8 +1056,9 @@ async def process_chat(session_id: str, message: str) -> str:
                 agent_args = ["--no-tools", "--tools", "read,grep,find,ls"]
             else:
                 agent_args = ["--approve"]
-            provider_name = preset.get("provider", PI_PROVIDER_NAME)
-            agent_args += ["--provider", provider_name]
+            provider_name = preset.get("provider")
+            if provider_name:
+                agent_args += ["--provider", provider_name]
             agent_args += ["--model", current_model]
             if current_reasoning_effort:
                 # A continued Pi session restores its recorded thinking level in

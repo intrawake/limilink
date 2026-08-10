@@ -18,8 +18,6 @@ def mock_config():
                     "gemini-cli": {"harness": "gemini-cli"},
                     "pi-agent": {"harness": "pi"},
                 },
-                "pi_agent_openai_base_url": "http://test-host:11435/v1",
-                "pi_agent_openai_api_key": "test-sk-key",
             },
             "/test/config/dir",
         )
@@ -50,8 +48,7 @@ async def test_agent_switching(mock_exec, mock_config):
         assert response.status_code == 200
         assert "Agent switched to: pi-agent" in response.json()["reply"]
 
-        # Verify next chat uses the new agent and has correct argument order
-        # We also want to check that models.json is generated
+        # Verify next chat uses the new agent and has correct argument order.
         response = c.post("/chat", json={"message": "hello", "session_id": session_id})
         assert response.status_code == 200
 
@@ -76,7 +73,7 @@ async def test_agent_switching(mock_exec, mock_config):
 
 @pytest.mark.asyncio
 async def test_agent_switch_reconciles_pi_resources(tmp_path, test_sessions_dir):
-    """Switching Pi presets replaces auth and clears stale per-agent state."""
+    """Switching Pi presets replaces auth without touching user-owned models."""
     import json
     import os
 
@@ -123,8 +120,9 @@ async def test_agent_switch_reconciles_pi_resources(tmp_path, test_sessions_dir)
             json={"message": "!reasoning_effort xhigh", "session_id": session_id},
         )
         models_path = os.path.join(session_path, ".pi", "agent", "models.json")
+        user_models = {"providers": {"user-owned": {}}}
         async with aiofiles.open(models_path, "w") as f:
-            await f.write(json.dumps({"providers": {"stale": {}}}))
+            await f.write(json.dumps(user_models))
 
         response = c.post(
             "/chat",
@@ -136,7 +134,8 @@ async def test_agent_switch_reconciles_pi_resources(tmp_path, test_sessions_dir)
     assert os.path.realpath(auth_link) == str(second_auth)
     assert not os.path.exists(os.path.join(session_path, ".model"))
     assert not os.path.exists(os.path.join(session_path, ".reasoning_effort"))
-    assert not os.path.exists(models_path)
+    async with aiofiles.open(models_path) as f:
+        assert json.loads(await f.read()) == user_models
     async with aiofiles.open(
         os.path.join(session_path, ".pi", "agent", "settings.json")
     ) as f:
@@ -164,7 +163,6 @@ async def test_pi_agent_env_vars(mock_exec, mock_config):
     # Check env vars passed to subprocess
     env = mock_exec.call_args[1]["env"]
     assert "PI_CODING_AGENT_DIR" in env
-    # API key is delivered via models.json, not env vars
     assert "OPENAI_API_KEY" not in env
 
 
@@ -248,8 +246,6 @@ async def test_reasoning_effort_show_from_preset_before_first_chat(mock_config):
                     "harness": "pi",
                     "model": "test-model",
                     "reasoning_effort": "high",
-                    "openai_base_url": "http://test:11435/v1",
-                    "openai_api_key": "sk-test",
                 },
             },
         },
@@ -394,8 +390,6 @@ async def test_reasoning_effort_in_preset_writes_settings(
                     "harness": "pi",
                     "model": "test-model",
                     "reasoning_effort": "high",
-                    "openai_base_url": "http://test:11435/v1",
-                    "openai_api_key": "sk-test",
                 },
             },
         },
@@ -412,7 +406,7 @@ async def test_reasoning_effort_in_preset_writes_settings(
             json={"message": "!agent pi-test", "session_id": session_id},
         )
 
-        # Send a chat to trigger first-run model/settings writes
+        # Send a chat to trigger the first-run settings write.
         response = c.post("/chat", json={"message": "hello", "session_id": session_id})
         assert response.status_code == 200
 
