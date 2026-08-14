@@ -1,6 +1,9 @@
+import asyncio
 import atexit
+import contextlib
 import json
 import logging
+import math
 import os
 import signal
 import sys
@@ -16,6 +19,23 @@ from main import get_sessions_dir, load_config
 logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
+
+
+def parse_reconnect_watchdog_seconds(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError as exc:
+        raise ValueError(
+            "DISCORD_RECONNECT_WATCHDOG_SECONDS must be a positive number"
+        ) from exc
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("DISCORD_RECONNECT_WATCHDOG_SECONDS must be a positive number")
+    return seconds
+
+
+RECONNECT_WATCHDOG_SECONDS = parse_reconnect_watchdog_seconds(
+    os.environ.get("DISCORD_RECONNECT_WATCHDOG_SECONDS", "300")
+)
 
 cfg, config_dir = load_config()
 
@@ -67,6 +87,7 @@ SESSION_TRACKER_FILE: str = os.path.join(sessions_dir, "channel_sessions.json")
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
+_gateway_watchdog_task: asyncio.Task[None] | None = None
 
 if os.path.exists(SESSION_TRACKER_FILE):
     try:
@@ -151,6 +172,51 @@ async def poll_notifyme():
                             )
         except Exception:
             logger.debug("poll_notifyme error", exc_info=True)
+
+
+def restart_process():
+    logger.error(
+        "Discord gateway has not reconnected for %.0f seconds; restarting the bot",
+        RECONNECT_WATCHDOG_SECONDS,
+    )
+    logging.shutdown()
+    os.execv(sys.executable, [sys.executable, *sys.argv])
+
+
+async def restart_after_gateway_outage():
+    await asyncio.sleep(RECONNECT_WATCHDOG_SECONDS)
+    restart_process()
+
+
+async def gateway_connected():
+    global _gateway_watchdog_task
+    task = _gateway_watchdog_task
+    _gateway_watchdog_task = None
+    if task is not None and not task.done():
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+@client.event
+async def on_disconnect():
+    global _gateway_watchdog_task
+    if _gateway_watchdog_task is None or _gateway_watchdog_task.done():
+        logger.warning(
+            "Discord gateway disconnected; restarting if it stays down for %.0f seconds",
+            RECONNECT_WATCHDOG_SECONDS,
+        )
+        _gateway_watchdog_task = asyncio.create_task(restart_after_gateway_outage())
+
+
+@client.event
+async def on_connect():
+    await gateway_connected()
+
+
+@client.event
+async def on_resumed():
+    await gateway_connected()
 
 
 @client.event

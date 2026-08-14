@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -40,6 +41,55 @@ class TestDiscordBot(unittest.TestCase):
         with open(bot.SESSION_TRACKER_FILE, "r") as f:
             data = json.load(f)
         self.assertEqual(data["123"], "session_123")
+
+    def test_persistent_gateway_outage_restarts_process(self):
+        async def run_test():
+            bot._gateway_watchdog_task = None
+            with (
+                patch.object(bot, "RECONNECT_WATCHDOG_SECONDS", 0),
+                patch.object(bot, "restart_process") as mock_restart,
+            ):
+                await bot.on_disconnect()
+                watchdog = bot._gateway_watchdog_task
+                assert watchdog is not None
+                await watchdog
+                mock_restart.assert_called_once_with()
+
+        asyncio.run(run_test())
+
+    def test_gateway_recovery_cancels_restart(self):
+        async def run_test():
+            for recovery_event in (bot.on_connect, bot.on_resumed):
+                bot._gateway_watchdog_task = None
+                with (
+                    patch.object(bot, "RECONNECT_WATCHDOG_SECONDS", 60),
+                    patch.object(bot, "restart_process") as mock_restart,
+                ):
+                    await bot.on_disconnect()
+                    watchdog = bot._gateway_watchdog_task
+                    assert watchdog is not None
+                    await recovery_event()
+                    self.assertTrue(watchdog.cancelled())
+                    mock_restart.assert_not_called()
+
+        asyncio.run(run_test())
+
+    def test_reconnect_watchdog_seconds_must_be_positive_and_finite(self):
+        self.assertEqual(bot.parse_reconnect_watchdog_seconds("12.5"), 12.5)
+        for value in ("bad", "0", "-1", "nan", "inf", "-inf"):
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ValueError, "must be a positive number"),
+            ):
+                bot.parse_reconnect_watchdog_seconds(value)
+
+    @patch("demo.discord_bot.os.execv")
+    @patch("demo.discord_bot.logging.shutdown")
+    def test_restart_process_reexecutes_python(self, mock_shutdown, mock_execv):
+        bot.restart_process()
+
+        mock_shutdown.assert_called_once_with()
+        mock_execv.assert_called_once_with(sys.executable, [sys.executable, *sys.argv])
 
     @patch("demo.discord_bot.httpx.AsyncClient")
     @patch("discord.File")
