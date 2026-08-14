@@ -4,10 +4,11 @@ import tempfile
 
 import pytest
 
-# Set a safe default for LIMILINK_SESSIONS_DIR during test discovery and imports.
-# This prevents top-level code from touching the live session directory.
+# Set safe defaults before test discovery imports application modules.
 _discovery_sessions_dir = tempfile.mkdtemp(prefix="limilink_test_discovery_")
 os.environ["LIMILINK_SESSIONS_DIR"] = _discovery_sessions_dir
+os.environ["OTEL_TRACES_EXPORTER"] = "none"
+os.environ["OTEL_LOGS_EXPORTER"] = "none"
 
 
 @pytest.fixture(autouse=True)
