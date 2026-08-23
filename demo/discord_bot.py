@@ -9,6 +9,7 @@ import signal
 import sys
 import tempfile
 
+import aiohttp
 import discord
 import httpx2 as httpx
 from discord.ext import tasks
@@ -86,7 +87,6 @@ SESSION_TRACKER_FILE: str = os.path.join(sessions_dir, "channel_sessions.json")
 
 intents = discord.Intents.default()
 intents.message_content = True
-client = discord.Client(intents=intents)
 _gateway_watchdog_task: asyncio.Task[None] | None = None
 
 if os.path.exists(SESSION_TRACKER_FILE):
@@ -198,7 +198,6 @@ async def gateway_connected():
             await task
 
 
-@client.event
 async def on_disconnect():
     global _gateway_watchdog_task
     if _gateway_watchdog_task is None or _gateway_watchdog_task.done():
@@ -209,17 +208,14 @@ async def on_disconnect():
         _gateway_watchdog_task = asyncio.create_task(restart_after_gateway_outage())
 
 
-@client.event
 async def on_connect():
     await gateway_connected()
 
 
-@client.event
 async def on_resumed():
     await gateway_connected()
 
 
-@client.event
 async def on_ready():
     print(
         f"Limilink Discord Bot logged in as {client.user} connected to proxy on port {port}"
@@ -228,7 +224,6 @@ async def on_ready():
         poll_notifyme.start()
 
 
-@client.event
 async def on_message(message):
     if message.author == client.user:
         return
@@ -304,10 +299,51 @@ async def on_message(message):
             await message.channel.send(error_msg)
 
 
+def create_client():
+    new_client = discord.Client(intents=intents)
+    for event in (on_disconnect, on_connect, on_resumed, on_ready, on_message):
+        new_client.event(event)
+    return new_client
+
+
+client = create_client()
+
+
+async def run_bot(token: str):
+    global client
+    # discord.py retries gateway connections, but Client.start's login is one-shot.
+    delay = 1.0
+    while True:
+        async with client:
+            try:
+                await client.login(token)
+            except discord.HTTPException as exc:
+                if not 500 <= exc.status < 600:
+                    raise
+                reason = f"HTTP {exc.status}"
+            except (
+                aiohttp.ClientConnectionError,
+                aiohttp.ClientPayloadError,
+                TimeoutError,
+            ) as exc:
+                reason = type(exc).__name__
+            else:
+                await client.connect(reconnect=True)
+                return
+        logger.warning(
+            "Discord login unavailable (%s); retrying in %.0f seconds", reason, delay
+        )
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, 60.0)
+        # Each login allocates a session; close it above and use a fresh connector.
+        client = create_client()
+
+
 if __name__ == "__main__":
     if TOKEN is None:
         logger.error(
             "Error: DISCORD_BOT_TOKEN environment variable or discord_bot_token in config.sxpb not set."
         )
         sys.exit(1)
-    client.run(str(TOKEN))
+    discord.utils.setup_logging()
+    asyncio.run(run_bot(str(TOKEN)))
