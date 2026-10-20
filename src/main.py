@@ -10,8 +10,11 @@ import shutil
 import signal
 import subprocess
 import time
+import threading
 import uuid
+from contextlib import ExitStack, asynccontextmanager, contextmanager, suppress
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 import sxpb
@@ -23,13 +26,53 @@ try:
 except ImportError:
     tracer = None
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field, field_validator
+
+from session_layout import (
+    InvalidSessionOrder,
+    TrashExpired,
+    delete_session_now,
+    expire_session_trash,
+    has_due_trash,
+    list_session_details,
+    queue_session_trash,
+    rename_session,
+    reorder_sessions,
+    restore_session,
+    trash_deadline,
+)
+
+from compact_rpc import CompactRPCError, compact_rpc
+from session_lease import SessionLeaseBusy, pi_lease_command, session_lease
+from session_snapshot import history_snapshot
+from send_receipt import (
+    SendConflict,
+    SendIndeterminate,
+    complete_send,
+    receipt_path,
+    read_send,
+    reserve_send,
+)
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
+
+@asynccontextmanager
+async def app_lifespan(app: FastAPI):
+    sweep_session_trash()
+    worker = asyncio.create_task(trash_worker())
+    try:
+        yield
+    finally:
+        worker.cancel()
+        with suppress(asyncio.CancelledError):
+            await worker
+
+
+app = FastAPI(lifespan=app_lifespan)
 
 
 class HarnessType(str, Enum):
@@ -45,6 +88,65 @@ class HarnessType(str, Enum):
 # Global tracker for running agent harness processes (session_id -> process)
 running_processes: dict[str, asyncio.subprocess.Process] = {}
 session_locks: dict[str, asyncio.Lock] = {}
+lifecycle_gate = threading.RLock()
+session_activity: dict[tuple[str, str], int] = {}
+active_web_sends: dict[tuple[str, str, str], asyncio.Future[dict]] = {}
+
+
+def session_is_busy(root: Path, session_id: str) -> bool:
+    lock = session_locks.get(session_id)
+    return (
+        session_activity.get((str(root.resolve()), session_id), 0) > 0
+        or session_id in running_processes
+        or (lock is not None and lock.locked())
+    )
+
+
+@contextmanager
+def session_admission(root: Path, session_id: str):
+    key = (str(root.resolve()), session_id)
+    with ExitStack() as stack:
+        with lifecycle_gate:
+            try:
+                deadline = trash_deadline(root, session_id)
+            except (OSError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=500, detail="Could not verify session trash state."
+                ) from exc
+            if deadline is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Session is in trash. Undo before its deadline to continue.",
+                )
+            fd = stack.enter_context(session_lease(root, session_id))
+            if fd is None:
+                raise HTTPException(status_code=409, detail="Session is being deleted.")
+            session_activity[key] = session_activity.get(key, 0) + 1
+        try:
+            yield fd
+        finally:
+            with lifecycle_gate:
+                session_activity[key] -= 1
+                if not session_activity[key]:
+                    del session_activity[key]
+
+
+def sweep_session_trash():
+    try:
+        cfg, config_dir = load_config()
+        root = Path(get_sessions_dir(cfg, config_dir))
+        now = time.time()
+        with lifecycle_gate:
+            if root.is_dir() and has_due_trash(root, now):
+                expire_session_trash(root, lambda key: session_is_busy(root, key), now)
+    except (OSError, ValueError):
+        logger.exception("Trash cleanup failed; queued state is retained.")
+
+
+async def trash_worker():
+    while True:
+        await asyncio.sleep(1)
+        sweep_session_trash()
 
 
 def get_session_lock(session_id: str) -> asyncio.Lock:
@@ -59,6 +161,7 @@ def get_session_lock(session_id: str) -> asyncio.Lock:
 class ChatRequest(BaseModel):
     message: str
     session_id: str
+    request_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
 
 
 class ChatResponse(BaseModel):
@@ -303,6 +406,105 @@ async def list_sessions():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class SessionTitleRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def trim_title(cls, value: Any):
+        return value.strip() if isinstance(value, str) else value
+
+
+class SessionOrderRequest(BaseModel):
+    session_ids: list[str]
+
+
+def session_layout_root() -> Path:
+    cfg, config_dir = load_config()
+    root = Path(get_sessions_dir(cfg, config_dir))
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+@app.get("/session-sidebar")
+async def session_sidebar():
+    try:
+        return {
+            "sessions": list_session_details(session_layout_root()),
+            "server_time": time.time(),
+        }
+    except (OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=500, detail="Could not read session titles and order."
+        ) from exc
+
+
+@app.post("/sessions/{session_id}/trash")
+async def trash_session(session_id: str):
+    if session_id != sanitize_session_id(session_id):
+        raise HTTPException(status_code=400, detail="Invalid session ID")
+    try:
+        with lifecycle_gate:
+            root = session_layout_root()
+            queue_session_trash(root, session_id)
+            return {"sessions": list_session_details(root), "server_time": time.time()}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Session no longer exists") from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=500, detail="Could not move session to trash."
+        ) from exc
+
+
+@app.delete("/sessions/{session_id}/trash")
+async def undo_session_trash(session_id: str):
+    if session_id != sanitize_session_id(session_id):
+        raise HTTPException(status_code=400, detail="Invalid session ID")
+    try:
+        with lifecycle_gate:
+            root = session_layout_root()
+            restore_session(root, session_id)
+            return {"sessions": list_session_details(root), "server_time": time.time()}
+    except TrashExpired as exc:
+        raise HTTPException(status_code=410, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Session no longer exists") from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=500, detail="Could not restore session."
+        ) from exc
+
+
+@app.patch("/sessions/{session_id}/title")
+async def update_session_title(session_id: str, request: SessionTitleRequest):
+    if session_id != sanitize_session_id(session_id):
+        raise HTTPException(status_code=400, detail="Invalid session ID")
+    try:
+        rename_session(session_layout_root(), session_id, request.title)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Session no longer exists") from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=500, detail="Could not save session title."
+        ) from exc
+    return {"id": session_id, "title": request.title}
+
+
+@app.put("/session-sidebar/order")
+async def update_session_order(request: SessionOrderRequest):
+    try:
+        reorder_sessions(session_layout_root(), request.session_ids)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except InvalidSessionOrder as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=500, detail="Could not save session order."
+        ) from exc
+    return {"status": "saved"}
+
+
 @app.post("/sessions")
 async def create_session(agent: str | None = None):
     cfg, config_dir = load_config()
@@ -332,25 +534,30 @@ async def create_session(agent: str | None = None):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    session_path = os.path.join(sessions_dir, safe_id)
-    os.makedirs(session_path, exist_ok=True)
+    root = Path(sessions_dir)
+    with lifecycle_gate:
+        while (root / safe_id).exists() or trash_deadline(root, safe_id) is not None:
+            safe_id = f"session_{uuid.uuid4().hex[:8]}"
+    with session_admission(root, safe_id):
+        session_path = os.path.join(sessions_dir, safe_id)
+        os.makedirs(session_path, exist_ok=True)
 
-    ensure_session_initialized(
-        session_path, cfg, config_dir, agent_alias=effective_agent
-    )
+        ensure_session_initialized(
+            session_path, cfg, config_dir, agent_alias=effective_agent
+        )
 
-    agent_path = os.path.join(session_path, ".agent_type")
-    async with aiofiles.open(agent_path, "w") as f:
-        await f.write(effective_agent)
+        agent_path = os.path.join(session_path, ".agent_type")
+        async with aiofiles.open(agent_path, "w") as f:
+            await f.write(effective_agent)
 
-    # Persist the resolved model for external tools (diary, etc.)
-    preset = agent_by_alias.get(effective_agent, {})
-    model = preset.get("model") or cfg.get("pi_agent_model", "auto")
-    model_path = os.path.join(session_path, ".model")
-    async with aiofiles.open(model_path, "w") as f:
-        await f.write(model)
+        # Persist the resolved model for external tools (diary, etc.)
+        preset = agent_by_alias.get(effective_agent, {})
+        model = preset.get("model") or cfg.get("pi_agent_model", "auto")
+        model_path = os.path.join(session_path, ".model")
+        async with aiofiles.open(model_path, "w") as f:
+            await f.write(model)
 
-    return {"status": "created", "session_id": safe_id}
+        return {"status": "created", "session_id": safe_id}
 
 
 @app.delete("/sessions/{session_id}")
@@ -361,12 +568,22 @@ async def delete_session(session_id: str):
     session_path = os.path.join(sessions_dir, safe_id)
     if os.path.exists(session_path) and os.path.isdir(session_path):
         try:
-            shutil.rmtree(session_path)
-            # Also clean up the per-session tmp dir
-            session_tmp = get_session_tmp_dir(session_path)
-            if os.path.isdir(session_tmp):
-                shutil.rmtree(session_tmp, ignore_errors=True)
+            root = Path(sessions_dir)
+            with lifecycle_gate:
+                if (
+                    session_is_busy(root, safe_id)
+                    or trash_deadline(root, safe_id) is not None
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Session is busy or in trash; queued deletion preserves its Undo window.",
+                    )
+                delete_session_now(root, safe_id)
             return {"status": "deleted", "session_id": safe_id}
+        except HTTPException:
+            raise
+        except SessionLeaseBusy as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
     return {"status": "not_found"}
@@ -398,10 +615,17 @@ def load_session_history(session_path: str) -> list[dict[Any, Any]]:
 
 def append_to_history(session_path: str, role: str, content: str):
     os.makedirs(session_path, exist_ok=True)
-    history = load_session_history(session_path)
+    history_file = Path(get_history_path(session_path))
+    history = history_snapshot(history_file)["history"]
     history.append({"role": role, "content": content})
-    with open(get_history_path(session_path), "w") as f:
-        json.dump(history, f)
+    temporary = history_file.with_name(f".history.{uuid.uuid4().hex}.tmp")
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as output:
+            json.dump(history, output)
+        os.replace(temporary, history_file)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 @app.get("/sessions/{session_id}/history", response_model=HistoryResponse)
@@ -413,6 +637,66 @@ async def get_session_history(session_id: str):
     if not os.path.exists(session_path):
         return {"history": []}
     return {"history": load_session_history(session_path)}
+
+
+def send_snapshot(root: Path, session_id: str, request_id: str) -> dict:
+    result = {"id": request_id, "state": "indeterminate"}
+    try:
+        record = read_send(receipt_path(root / session_id, request_id, create=False))
+    except FileNotFoundError:
+        return {**result, "state": "missing"}
+    except (OSError, ValueError):
+        return result
+    if record["state"] == "complete":
+        return {**result, "state": "complete", "outcome": record["outcome"]}
+    future = active_web_sends.get((str(root.resolve()), session_id, request_id))
+    if future is not None and not future.done() and future.get_loop().is_running():
+        return {**result, "state": "running"}
+    return result
+
+
+@app.get("/sessions/{session_id}/snapshot")
+async def get_session_snapshot(
+    session_id: str,
+    revision: str | None = None,
+    request_id: str | None = Query(default=None, pattern=r"^[0-9a-f]{32}$"),
+):
+    if session_id != sanitize_session_id(session_id):
+        raise HTTPException(status_code=400, detail="Invalid session ID")
+    cfg, config_dir = load_config()
+    root = Path(get_sessions_dir(cfg, config_dir))
+    try:
+        with lifecycle_gate:
+            path = root / session_id
+            if not path.is_dir():
+                raise HTTPException(status_code=404, detail="Session no longer exists")
+            result = history_snapshot(path / "chat_history.json", revision)
+            root_id = str(root.resolve())
+            active = {
+                key
+                for (owner, key), count in session_activity.items()
+                if owner == root_id and count > 0
+            }
+            active.update(running_processes)
+            active.update(key for key, lock in session_locks.items() if lock.locked())
+            busy = session_id in active
+            if not busy:
+                with session_lease(root, session_id, exclusive=True) as fd:
+                    busy = fd is None
+            if busy:
+                active.add(session_id)
+            result.update(
+                session_id=session_id, busy=busy, busy_sessions=sorted(active)
+            )
+            if request_id is not None:
+                result["send"] = send_snapshot(root, session_id, request_id)
+            return JSONResponse(result, headers={"Cache-Control": "no-store"})
+    except HTTPException:
+        raise
+    except (OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=500, detail="Could not read conversation state."
+        ) from exc
 
 
 VALID_REASONING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
@@ -465,6 +749,14 @@ def write_pi_settings_json(session_path: str, reasoning_effort: str | None):
 
 
 async def process_chat(session_id: str, message: str) -> str:
+    cfg, config_dir = load_config()
+    root = Path(get_sessions_dir(cfg, config_dir))
+    safe_id = sanitize_session_id(session_id)
+    with session_admission(root, safe_id) as lease_fd:
+        return await _process_chat(session_id, message, lease_fd)
+
+
+async def _process_chat(session_id: str, message: str, lease_fd: int) -> str:
     try:
         # Secure the session_id to prevent directory traversal
         safe_session_id = sanitize_session_id(session_id)
@@ -710,10 +1002,14 @@ async def process_chat(session_id: str, message: str) -> str:
                 entry_path = os.path.join(sessions_dir, entry)
                 if not os.path.isdir(entry_path):
                     continue
-                # Skip sessions with active running processes
-                if entry in running_processes:
-                    skipped_active.append(entry)
-                    continue
+                # Never bypass active work or a queued session's grace period.
+                with lifecycle_gate:
+                    if (
+                        session_is_busy(Path(sessions_dir), entry)
+                        or trash_deadline(Path(sessions_dir), entry) is not None
+                    ):
+                        skipped_active.append(entry)
+                        continue
                 # Use chat_history.json mtime as the last-activity timestamp
                 history_file = get_history_path(entry_path)
                 if os.path.exists(history_file):
@@ -722,11 +1018,17 @@ async def process_chat(session_id: str, message: str) -> str:
                     last_activity = os.path.getmtime(entry_path)
                 if last_activity < cutoff:
                     try:
-                        shutil.rmtree(entry_path)
-                        session_tmp = get_session_tmp_dir(entry_path)
-                        if os.path.isdir(session_tmp):
-                            shutil.rmtree(session_tmp, ignore_errors=True)
+                        with lifecycle_gate:
+                            if (
+                                session_is_busy(Path(sessions_dir), entry)
+                                or trash_deadline(Path(sessions_dir), entry) is not None
+                            ):
+                                skipped_active.append(entry)
+                                continue
+                            delete_session_now(Path(sessions_dir), entry)
                         deleted.append(entry)
+                    except SessionLeaseBusy:
+                        skipped_active.append(entry)
                     except Exception as e:
                         reply = f"Failed to delete session '{entry}': {e}"
                         append_to_history(session_path, "bot", reply)
@@ -743,7 +1045,7 @@ async def process_chat(session_id: str, message: str) -> str:
                 lines.append(f"No stale sessions found (inactive > {n_days} day(s)).")
             if skipped_active:
                 lines.append(
-                    f"Skipped {len(skipped_active)} active session(s): {', '.join(f'`{s}`' for s in skipped_active)}"
+                    f"Skipped {len(skipped_active)} busy or trashed session(s): {', '.join(f'`{s}`' for s in skipped_active)}"
                 )
             reply = "\n".join(lines)
             append_to_history(session_path, "bot", reply)
@@ -931,53 +1233,20 @@ async def process_chat(session_id: str, message: str) -> str:
                     )
 
             try:
-                process = await asyncio.create_subprocess_exec(
-                    exepath,
-                    *rpc_args,
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                compact_response = await compact_rpc(
+                    [exepath, *rpc_args],
+                    lease_fd=lease_fd,
                     cwd=session_path,
                     env=rpc_env,
+                    instructions=custom_instructions,
                 )
-
-                assert process.stdin is not None
-                assert process.stdout is not None
-
-                compact_cmd: dict[str, str] = {"type": "compact"}
-                if custom_instructions:
-                    compact_cmd["customInstructions"] = custom_instructions
-                process.stdin.write((json.dumps(compact_cmd) + "\n").encode())
-                await process.stdin.drain()
-
-                compact_response = None
-                while True:
-                    line = await process.stdout.readline()
-                    if not line:
-                        break
-                    try:
-                        event = json.loads(line.decode())
-                    except json.JSONDecodeError:
-                        continue
-                    if (
-                        event.get("type") == "response"
-                        and event.get("command") == "compact"
-                    ):
-                        compact_response = event
-                        break
-
-                process.stdin.close()
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-                await process.wait()
 
                 if compact_response is None:
                     reply = "Compaction produced no response."
                 elif not compact_response.get("success"):
                     error = compact_response.get("error", "unknown error")
-                    reply = f"Compaction failed: {error}"
+                    preview = error[:500] + "…" if len(error) > 500 else error
+                    reply = f"Compaction failed: {preview}"
                 else:
                     data = compact_response.get("data", {})
                     tokens_before = data.get("tokensBefore", "?")
@@ -989,8 +1258,11 @@ async def process_chat(session_id: str, message: str) -> str:
                             summary[:500] + "\u2026" if len(summary) > 500 else summary
                         )
                         reply += f"\n\n{preview}"
-            except Exception as e:
-                reply = f"Compact error: {e}"
+            except CompactRPCError as error:
+                reply = str(error)
+            except Exception:
+                logger.warning("Unexpected compact RPC failure")
+                reply = "Compaction failed."
 
             append_to_history(session_path, "bot", reply)
             return reply
@@ -1086,7 +1358,8 @@ async def process_chat(session_id: str, message: str) -> str:
             max_attempts = 3
             for attempt in range(max_attempts):
                 process = await asyncio.create_subprocess_exec(
-                    *cmd,
+                    *pi_lease_command(cmd, lease_fd),
+                    pass_fds=(lease_fd,),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     cwd=session_path,  # Execute within the isolated directory
@@ -1183,9 +1456,115 @@ async def process_chat(session_id: str, message: str) -> str:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def indeterminate_send(detail: str) -> dict:
+    return {"status": 409, "body": {"detail": detail, "code": "send_indeterminate"}}
+
+
+def send_response(outcome: dict) -> JSONResponse:
+    return JSONResponse(
+        outcome["body"], status_code=outcome["status"], headers=outcome.get("headers")
+    )
+
+
+async def identified_chat(request: ChatRequest) -> JSONResponse:
+    assert request.request_id is not None
+    cfg, config_dir = load_config()
+    root = Path(get_sessions_dir(cfg, config_dir))
+    safe_id = sanitize_session_id(request.session_id)
+    key = (str(root.resolve()), safe_id, request.request_id)
+    with session_admission(root, safe_id) as lease_fd:
+        try:
+            with lifecycle_gate:
+                path = receipt_path(root / safe_id, request.request_id)
+                owner, reservation = reserve_send(path, request.message)
+                if not owner:
+                    if reservation["state"] == "complete":
+                        logger.info(
+                            "Replayed completed Send %s for %s",
+                            request.request_id,
+                            safe_id,
+                        )
+                        return send_response(reservation["outcome"])
+                    future = active_web_sends.get(key)
+                    if (
+                        future is None
+                        or future.get_loop() is not asyncio.get_running_loop()
+                    ):
+                        return send_response(
+                            indeterminate_send(
+                                "This Send was already reserved but has no live response. Check the conversation; it will not be executed again."
+                            )
+                        )
+                    logger.info(
+                        "Joined active Send %s for %s", request.request_id, safe_id
+                    )
+                else:
+                    future = asyncio.get_running_loop().create_future()
+                    active_web_sends[key] = future
+                    logger.info("Reserved Send %s for %s", request.request_id, safe_id)
+        except SendConflict as exc:
+            return send_response({"status": 409, "body": {"detail": str(exc)}})
+        except (SendIndeterminate, OSError, ValueError) as exc:
+            logger.warning(
+                "Could not verify Send %s for %s: %s", request.request_id, safe_id, exc
+            )
+            return send_response(
+                indeterminate_send(
+                    "The Send receipt could not be verified. Check the conversation; it will not be executed automatically."
+                )
+            )
+
+        if not owner:
+            return send_response(await asyncio.shield(future))
+
+        try:
+            outcome: dict
+            try:
+                reply = await _process_chat(
+                    request.session_id, request.message, lease_fd
+                )
+                outcome = {"status": 200, "body": {"reply": reply}}
+            except HTTPException as exc:
+                outcome = {
+                    "status": exc.status_code,
+                    "body": {"detail": exc.detail},
+                    "headers": exc.headers or {},
+                }
+            except Exception as exc:
+                logger.exception("Send %s failed for %s", request.request_id, safe_id)
+                outcome = {"status": 500, "body": {"detail": str(exc)}}
+            try:
+                complete_send(path, reservation, outcome)
+            except (OSError, ValueError, TypeError):
+                logger.exception(
+                    "Could not save outcome for Send %s", request.request_id
+                )
+                outcome = indeterminate_send(
+                    "This Send's replay outcome could not be saved. Check the conversation before sending again."
+                )
+            if not future.done():
+                future.set_result(outcome)
+            return send_response(outcome)
+        except asyncio.CancelledError:
+            # Keep the reservation: cancellation does not prove the agent stopped.
+            if not future.done():
+                future.set_result(
+                    indeterminate_send(
+                        "The original Send was interrupted. Check the conversation; it will not be executed again."
+                    )
+                )
+            raise
+        finally:
+            with lifecycle_gate:
+                if active_web_sends.get(key) is future:
+                    del active_web_sends[key]
+
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
     try:
+        if request.request_id is not None:
+            return await identified_chat(request)
         reply_text = await process_chat(request.session_id, request.message)
         return {"reply": reply_text}
     except HTTPException:
@@ -1196,6 +1575,17 @@ async def chat_endpoint(request: ChatRequest):
 
 
 async def run_notifyme_task(session_id: str, message: str):
+    cfg, config_dir = load_config()
+    root = Path(get_sessions_dir(cfg, config_dir))
+    try:
+        with session_admission(root, sanitize_session_id(session_id)):
+            await _run_notifyme_task(session_id, message)
+    except HTTPException:
+        # A stale background notification must not recreate a trashed session.
+        logger.info("Notification skipped for an unavailable session.")
+
+
+async def _run_notifyme_task(session_id: str, message: str):
     """Deliver a notification and optionally get an agent response.
 
     The raw notification is enqueued immediately so it always appears
@@ -1256,7 +1646,12 @@ async def poll_session(session_id: str):
     return {"messages": messages}
 
 
-# Mount a simple static directory if needed later for the UI
-static_dir = os.path.join(os.path.dirname(__file__), "static")
+# Serve the session sidebar and chat UI.
+static_dir = os.path.join(os.path.dirname(__file__), "ui")
 if os.path.exists(static_dir):
-    app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+
+    @app.get("/", include_in_schema=False)
+    async def session_ui():
+        return FileResponse(os.path.join(static_dir, "resume.html"))
+
+    app.mount("/", StaticFiles(directory=static_dir), name="static")

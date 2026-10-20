@@ -91,7 +91,7 @@ def main():
         port=port,
         reload=False,
         log_level="info",
-        lifespan="off",
+        lifespan="on",
         log_config=None,
     )
     server = uvicorn.Server(config)

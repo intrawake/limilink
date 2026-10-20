@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content">
+    <meta name="theme-color" content="#17191e">
+    <title>Limilink Proxy</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/arrange.css">
+    <script src="/follow.js" defer></script>
+</head>
+<body>
+    <div id="app">
+        <button id="sidebar-backdrop" aria-label="Close sessions" tabindex="-1" hidden></button>
+        <aside id="session-sidebar" aria-label="Sessions">
+            <div class="sidebar-heading">
+                <span class="brand">LIMILINK</span>
+                <button id="sidebar-close" class="icon-button mobile-only" aria-label="Close sessions">×</button>
+            </div>
+            <div class="session-list-heading">
+                <button id="new-session-btn" class="new-session" aria-label="New session" title="New session">＋ New</button>
+                <h2>Sessions <span id="session-count">0</span></h2>
+                <button id="refresh-sessions" class="icon-button" aria-label="Refresh sessions" title="Refresh sessions">↻</button>
+            </div>
+            <ol id="session-list"></ol>
+        </aside>
+        <main id="conversation">
+            <header>
+                <button id="sidebar-toggle" class="icon-button mobile-only" aria-label="Open sessions" aria-controls="session-sidebar" aria-expanded="false">☰</button>
+                <div class="conversation-heading">
+                    <h1 id="session-title">Limilink</h1>
+                    <span id="session-directory"></span>
+                </div>
+            </header>
+            <div id="notice" role="status" hidden></div>
+            <div id="connection-status" role="status" hidden></div>
+            <div id="unconfirmed-send" role="status" hidden>
+                <span id="saved-send-status">Delivery couldn’t be confirmed. Check the conversation before resending.</span>
+                <details><summary>Saved message</summary><pre id="unconfirmed-text"></pre></details>
+                <button id="restore-unconfirmed" class="quiet-button">Restore as draft</button>
+                <button id="dismiss-unconfirmed" class="quiet-button">Dismiss</button>
+            </div>
+            <div id="chat-container" role="log" aria-label="Conversation" aria-busy="false"></div>
+            <div id="typing" role="status" hidden>Thinking…</div>
+            <div id="input-area">
+                <label class="visually-hidden" for="message-input">Message</label>
+                <textarea id="message-input" placeholder="Message…" rows="1" disabled></textarea>
+                <button id="send-btn" disabled>Send</button>
+            </div>
+        </main>
+    </div>
+    <dialog id="rename-dialog" aria-labelledby="rename-heading">
+        <form id="rename-form">
+            <h2 id="rename-heading">Rename session</h2>
+            <p class="dialog-description">The session directory stays the same.</p>
+            <label for="session-title-input">Title</label>
+            <input id="session-title-input" maxlength="160" required autocomplete="off">
+            <p id="rename-error" role="alert"></p>
+            <div class="dialog-buttons">
+                <button id="rename-cancel" type="button" class="quiet-button">Cancel</button>
+                <button id="rename-save" type="submit" class="primary-button">Save title</button>
+            </div>
+        </form>
+    </dialog>
+</body>
+</html>

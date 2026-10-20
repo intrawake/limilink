@@ -3,6 +3,9 @@ from __future__ import annotations
 import aiofiles
 import json
 import os
+import sys
+import subprocess
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -22,22 +25,22 @@ PI_CONFIG = {
 
 
 def _make_rpc_process(response_data: dict | None = None):
-    """Create a mock subprocess that emits a compact RPC response on stdout."""
+    """Fake child writes to the helper-owned stdout pipe during acquisition."""
     mock_process = AsyncMock()
-    # stdin.write / close / kill are sync in production (real asyncio subprocess)
     mock_process.stdin = AsyncMock()
     mock_process.stdin.write = MagicMock()
-    mock_process.stdin.close = MagicMock()
+    mock_process.stdin.transport = MagicMock()
+    mock_process.stdin.transport.is_closing.return_value = False
     mock_process.kill = MagicMock()
+    mock_process.returncode = None
+    mock_process.wait = AsyncMock(return_value=0)
 
-    if response_data is not None:
-        line = json.dumps(response_data).encode() + b"\n"
-    else:
-        line = b""
+    async def spawn(*args, **kwargs):
+        if response_data is not None:
+            os.write(kwargs["stdout"], json.dumps(response_data).encode() + b"\n")
+        return mock_process
 
-    mock_process.stdout = AsyncMock()
-    mock_process.stdout.readline = AsyncMock(side_effect=[line, b""])
-    mock_process.stderr = AsyncMock()
+    mock_process.spawn = spawn
     return mock_process
 
 
@@ -93,7 +96,7 @@ async def test_compact_success(test_sessions_dir):
 
     with (
         patch("main.load_config", return_value=(PI_CONFIG, "/test")),
-        patch("main.asyncio.create_subprocess_exec", return_value=mock_process),
+        patch("main.asyncio.create_subprocess_exec", side_effect=mock_process.spawn),
     ):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -133,7 +136,7 @@ async def test_compact_with_custom_instructions(test_sessions_dir):
 
     with (
         patch("main.load_config", return_value=(PI_CONFIG, "/test")),
-        patch("main.asyncio.create_subprocess_exec", return_value=mock_process),
+        patch("main.asyncio.create_subprocess_exec", side_effect=mock_process.spawn),
     ):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -167,7 +170,7 @@ async def test_compact_failure_response(test_sessions_dir):
 
     with (
         patch("main.load_config", return_value=(PI_CONFIG, "/test")),
-        patch("main.asyncio.create_subprocess_exec", return_value=mock_process),
+        patch("main.asyncio.create_subprocess_exec", side_effect=mock_process.spawn),
     ):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -190,7 +193,7 @@ async def test_compact_no_response(test_sessions_dir):
 
     with (
         patch("main.load_config", return_value=(PI_CONFIG, "/test")),
-        patch("main.asyncio.create_subprocess_exec", return_value=mock_process),
+        patch("main.asyncio.create_subprocess_exec", side_effect=mock_process.spawn),
     ):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -255,7 +258,7 @@ async def test_compact_rpc_args(test_sessions_dir):
     with (
         patch("main.load_config", return_value=(config, "/test")),
         patch(
-            "main.asyncio.create_subprocess_exec", return_value=mock_process
+            "main.asyncio.create_subprocess_exec", side_effect=mock_process.spawn
         ) as mock_exec,
     ):
         transport = httpx.ASGITransport(app=app)
@@ -265,7 +268,22 @@ async def test_compact_rpc_args(test_sessions_dir):
             )
 
     assert response.status_code == 200
-    called_args = mock_exec.call_args[0]
+    raw_args = mock_exec.call_args.args
+    kwargs = mock_exec.call_args.kwargs
+    assert raw_args[:3] == (sys.executable, "-I", "-S")
+    assert (
+        Path(raw_args[3]).resolve()
+        == Path(__file__).resolve().parents[1] / "tool/lease_exec.py"
+    )
+    assert raw_args[4] == str(kwargs["pass_fds"][0]) and raw_args[5] == "--"
+    assert (
+        kwargs["stdin"] == subprocess.PIPE
+        and isinstance(kwargs["stdout"], int)
+        and kwargs["stdout"] > 2
+        and kwargs["stdout"] not in kwargs["pass_fds"]
+        and kwargs["stderr"] == subprocess.DEVNULL
+    )
+    called_args = raw_args[6:]
     assert called_args[0] == "pi-agent"
     assert "--mode" in called_args
     assert "rpc" in called_args

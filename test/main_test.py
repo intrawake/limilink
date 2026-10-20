@@ -3,6 +3,9 @@ from __future__ import annotations
 import aiofiles
 import os
 import shutil
+import sys
+import subprocess
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,6 +14,20 @@ from fastapi.testclient import TestClient
 from main import app, ensure_session_initialized, reconcile_session_symlinks
 
 client = TestClient(app)
+
+
+def _pi_command(mock_exec):
+    args, kwargs = mock_exec.call_args.args, mock_exec.call_args.kwargs
+    assert args[:3] == (sys.executable, "-I", "-S")
+    assert (
+        Path(args[3]).resolve()
+        == Path(__file__).resolve().parents[1] / "tool/lease_exec.py"
+    )
+    assert args[4] == str(kwargs["pass_fds"][0])
+    assert args[5] == "--"
+    assert kwargs["process_group"] == 0
+    assert kwargs["stdout"] == subprocess.PIPE and kwargs["stderr"] == subprocess.PIPE
+    return args[6:]
 
 
 def test_list_sessions_empty():
@@ -80,7 +97,7 @@ async def test_chat_endpoint_invokes_pi(mock_exec, test_sessions_dir):
 
     # Verify the exact command invoked
     mock_exec.assert_called_once()
-    called_args = mock_exec.call_args[0]
+    called_args = _pi_command(mock_exec)
     # Verify some key arguments
     assert called_args[0] == "pi-agent"
     assert "--model" in called_args
@@ -343,7 +360,7 @@ async def test_pi_harness_passes_approve(mock_exec, mock_load_config):
 
     assert response.status_code == 200
     mock_exec.assert_called_once()
-    called_args = mock_exec.call_args[0]
+    called_args = _pi_command(mock_exec)
     assert called_args[0] == "pi-agent"
     assert "--approve" in called_args
     provider_idx = list(called_args).index("--provider")
@@ -612,19 +629,35 @@ def test_old_buggy_url_returns_error():
     )  # Method Not Allowed (no POST route for this path)
 
 
-def test_html_uses_correct_create_endpoint():
-    """The frontend HTML must use POST /sessions (not /sessions/<name>)."""
-    response = client.get("/")
-    html = response.text
-    # Should contain the correct endpoint (used in both the + button and auto-create)
-    assert html.count("fetch('/sessions', { method: 'POST' })") >= 2
-    # Should NOT use string concatenation with POST to create sessions
-    # (The old bug: fetch('/sessions/' + name, { method: 'POST' }))
-    post_lines = [line for line in html.split("\n") if "method: 'POST'" in line]
+def test_sidebar_assets_use_correct_create_endpoint():
+    """Both initial and explicit creation share POST /sessions, never a made-up ID."""
+    html = client.get("/").text
+    assert 'id="session-sidebar"' in html
+    assert 'src="/follow.js"' in html
+    assert 'href="/arrange.css"' in html
+    assert 'id="rename-current"' not in html
+    assert 'id="reorder-hint"' not in html
+    assert (
+        html.index('class="session-list-heading"')
+        < html.index('id="new-session-btn"')
+        < html.index('id="refresh-sessions"')
+    )
+    assert 'id="session-search"' not in html
+    assert 'id="session-select"' not in html
+    response = client.get("/follow.js")
+    assert response.status_code == 200
+    script = response.text
+    assert "api('/sessions', { method: 'POST' })" in script
+    assert "await createSession()" in script
+    assert "addEventListener('click', createSession)" in script
+    assert "generateSessionName" not in script
+    assert "edgeSwipe" not in script
+    assert "conversation.addEventListener('touch" not in script
+    assert "function focusDesktopComposer()" in script
+    post_lines = [line for line in script.splitlines() if "method: 'POST'" in line]
+    assert post_lines
     for line in post_lines:
-        assert "'/sessions/' +" not in line, (
-            f"old buggy POST pattern found: {line.strip()}"
-        )
+        assert "'/sessions/' +" not in line
 
 
 @pytest.mark.asyncio

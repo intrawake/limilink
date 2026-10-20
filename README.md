@@ -16,3 +16,11 @@ pdm lock --group discord
 pdm install -G discord
 pdm run limilink-discord
 ```
+
+## Tests
+
+```sh
+pdm run test
+node --test test/*_test.mjs
+pdm run lint
+```
