@@ -8,6 +8,9 @@
 #activity-status { color: var(--muted); font-size: 12px; margin: 0 2px 14px; }
 #activity-status.activity-stale { color: #d9ba86; }
 #activity-graph { position: relative; min-width: 270px; }
+.activity-section-heading { position: absolute; z-index: 1; left: 12px; right: 18px; margin: 0; padding-bottom: 6px; border-bottom: 1px solid var(--line); background: var(--panel); color: var(--muted); font-size: 11px; font-weight: 600; }
+.activity-node[data-group="history"] { background: #20232b; border-style: dashed; }
+.activity-node[data-group="history"].selected { background: #302a32; }
 #activity-graph svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
 .activity-edge { fill: none; stroke: #777385; stroke-width: 1.5; }
 .activity-edge.communication { stroke: #d9a28f; stroke-dasharray: 4 3; }
@@ -35,6 +38,14 @@
 #activity-events ol { list-style: none; padding: 0; margin-top: 8px; }
 #activity-events li { padding: 6px 2px; border-bottom: 1px solid #292d36; overflow-wrap: anywhere; }
 #activity-events time { color: var(--muted); display: block; font: 10px ui-monospace, monospace; }
+#activity-events .activity-event-children { margin: 6px 0 0; padding-left: 24px; border-left: 2px solid #80718f; }
+#activity-events .activity-event-children > li { padding-left: 0; padding-right: 0; border-bottom: 0; }
+#activity-events .activity-event-branch { color: #c5addc; margin-right: 5px; }
+#activity-events .activity-event-children.activity-indent-limit { margin-left: 0; padding-left: 0; border-left: 0; }
+#activity-events .activity-event-group > .activity-event-row > span { font-weight: 600; }
+#activity-events li[data-state="running"] > .activity-event-row > span { color: #d6c4ed; }
+#activity-events li[data-state="failed"] > .activity-event-row > span { color: #ffb0a9; }
+#activity-events .activity-event-note { display: block; color: var(--muted); font-size: 10px; }
 .activity-legend { font-size: 10px; color: var(--muted); padding: 4px 2px 10px; }
 .activity-legend span { margin-right: 12px; }
 #activity-backdrop { position: fixed; inset: 0; z-index: 11; background: #080a0eb3; border: none; }

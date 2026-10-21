@@ -233,7 +233,10 @@ async def test_compact_session_busy(test_sessions_dir):
 async def test_compact_rpc_args(test_sessions_dir):
     """Verify the RPC subprocess receives correct pi-agent arguments."""
     session_id = "test_compact_args"
-    _create_pi_session(test_sessions_dir, session_id)
+    owner = Path(_create_pi_session(test_sessions_dir, session_id)).resolve()
+    (owner / ".env_overrides.json").write_text(
+        json.dumps({"LIMILINK_ACTIVITY_PATH": "/wrong-session"})
+    )
 
     rpc_response = {
         "type": "response",
@@ -250,9 +253,11 @@ async def test_compact_rpc_args(test_sessions_dir):
                 "model": "test-model",
                 "provider": "openai-codex",
                 "reasoning_effort": "high",
+                "env_dict": {"LIMILINK_ACTIVITY_SESSION_DIR": "/wrong-directory"},
             }
         },
         "pi_agent_exepath": "pi-agent",
+        "env_dict": {"LIMILINK_ACTIVITY_OWNER_CWD": "/wrong-owner"},
     }
 
     with (
@@ -293,3 +298,10 @@ async def test_compact_rpc_args(test_sessions_dir):
     assert called_args[provider_idx + 1] == "openai-codex"
     thinking_idx = list(called_args).index("--thinking")
     assert called_args[thinking_idx + 1] == "high"
+    assert "-p" not in called_args
+    extension = Path(called_args[called_args.index("--extension") + 1])
+    assert extension.name == "activity-bridge.mjs" and extension.is_absolute()
+    env = mock_exec.call_args.kwargs["env"]
+    assert env["LIMILINK_ACTIVITY_PATH"] == str(owner / ".activity.json")
+    assert env["LIMILINK_ACTIVITY_OWNER_CWD"] == str(owner)
+    assert env["LIMILINK_ACTIVITY_SESSION_DIR"] == str(owner / ".pi/agent/session")

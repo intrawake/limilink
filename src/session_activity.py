@@ -31,6 +31,24 @@ class Tool(Record):
     startedAt: float = Field(ge=0)
 
 
+class SessionObservation(Record):
+    basis: Literal["pi-session-events"]
+    status: Literal["open", "closed", "stale", "conflict"]
+    ancestry: Literal["file-reference", "unresolved", "ambiguous"]
+    observedAt: float = Field(ge=0)
+    omitted: int = Field(ge=0)
+    modelBasis: Literal["response", "selected"] | None = None
+    selectedModel: str | None = Field(default=None, max_length=200)
+    modelObservedAt: float | None = Field(default=None, ge=0)
+    lastInputObservedAt: float | None = Field(default=None, ge=0)
+    invalidated: Literal["compaction", "model-change"] | None = None
+
+
+class SessionTracking(Record):
+    available: bool
+    limited: bool
+
+
 class Node(Record):
     id: str = Field(max_length=240)
     parentId: str | None = Field(default=None, max_length=240)
@@ -42,13 +60,14 @@ class Node(Record):
     lastInputTokens: float | None = Field(default=None, ge=0)
     updatedAt: float | None = Field(default=None, ge=0)
     currentTool: str | None = Field(default=None, max_length=120)
+    observation: SessionObservation | None = None
 
 
 class Edge(Record):
     id: str = Field(max_length=240)
     source: str = Field(max_length=240)
     target: str = Field(max_length=240)
-    kind: Literal["delegation", "message", "reply", "steer"]
+    kind: Literal["delegation", "ancestry", "message", "reply", "steer"]
     label: str = Field(max_length=160)
     at: float | None = Field(default=None, ge=0)
 
@@ -59,6 +78,8 @@ class Event(Record):
     kind: str = Field(max_length=40)
     label: str = Field(max_length=200)
     nodeId: str | None = Field(default=None, max_length=240)
+    parentEventId: str | None = Field(default=None, max_length=240)
+    state: Literal["running", "finished", "failed", "stopped", "unknown"] | None = None
 
 
 class Activity(Record):
@@ -73,6 +94,7 @@ class Activity(Record):
     edges: list[Edge] = Field(default_factory=list, max_length=128)
     events: list[Event] = Field(default_factory=list, max_length=40)
     subagentsAvailable: bool = False
+    sessionTracking: SessionTracking | None = None
 
 
 def activity_snapshot(path: Path, live: bool, revision: str | None = None) -> dict:

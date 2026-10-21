@@ -11,6 +11,10 @@ async page => {
     await page.locator('.session-row[data-session-id="session_a"] .session-link').click();
     await page.waitForFunction(() => !document.querySelector('#send-btn').disabled);
     const browserBodies = [];
+    await page.evaluate(() => {
+        window.humanSendCount = 0;
+        document.addEventListener('limilink:human-send', () => window.humanSendCount++);
+    });
     let firstRoute, firstResponse, captured, finished;
     const seen = new Promise(resolve => { captured = resolve; });
     const completed = new Promise(resolve => { finished = resolve; });
@@ -48,6 +52,7 @@ async page => {
     });
     await page.waitForFunction(message => document.querySelector('#chat-container').textContent.includes(`Fixture reply: ${message}`) && !document.querySelector('#send-btn').disabled, text);
     check(browserBodies.length === 1, 'Returning to the page automatically posted again');
+    check(await page.evaluate(() => window.humanSendCount) === 1, 'Receipt replay/recovery advanced the human boundary');
     let saved = await (await page.request.get(`${base}/sessions/session_a/history`)).json();
     check(saved.history.filter(item => item.role === 'user' && item.content === text).length === 1, 'One ID created duplicate saved user entries');
     check(saved.history.filter(item => item.role === 'bot' && item.content === `Fixture reply: ${text}`).length === 1, 'One ID created duplicate saved replies');
@@ -65,6 +70,7 @@ async page => {
     await page.locator('#send-btn').click();
     await page.waitForFunction(message => [...document.querySelectorAll('.message.bot')].filter(item => item.textContent === `Fixture reply: ${message}`).length === 2 && !document.querySelector('#send-btn').disabled, text);
     check(secondId !== original.request_id && /^[0-9a-f]{32}$/.test(secondId), 'A new Send reused the old ID');
+    check(await page.evaluate(() => window.humanSendCount) === 2, 'Deliberate second Send did not advance exactly once');
     saved = await (await page.request.get(`${base}/sessions/session_a/history`)).json();
     check(saved.history.filter(item => item.role === 'user' && item.content === text).length === 2, 'Legitimate identical message was suppressed');
     await page.unroute('**/chat');

@@ -924,6 +924,9 @@ async function sendMessage() {
     appendMessage(text, 'user');
     renderSessions();
     updateInputState();
+    // Human action only: reconciliation, background replies and retries do not
+    // emit this display boundary. No message content is sent to the observer.
+    document.dispatchEvent(new CustomEvent('limilink:human-send', { detail: { sessionId: id, requestId: request.id } }));
     let failure = null;
     try {
         const response = api('/chat', jsonRequest('POST', { session_id: id, message: text, request_id: request.id }));

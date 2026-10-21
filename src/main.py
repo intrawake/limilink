@@ -156,6 +156,16 @@ def get_session_lock(session_id: str) -> asyncio.Lock:
     return session_locks[session_id]
 
 
+def _add_activity_observer(args: list[str], env: dict[str, str], session_path: str):
+    """Bind both normal and compact invocations after configurable env merges."""
+    bridge = Path(__file__).resolve().parent.parent / "tool" / "activity-bridge.mjs"
+    args.extend(["--extension", str(bridge)])
+    owner = Path(session_path).resolve()
+    env["LIMILINK_ACTIVITY_PATH"] = str(owner / ".activity.json")
+    env["LIMILINK_ACTIVITY_OWNER_CWD"] = str(owner)
+    env["LIMILINK_ACTIVITY_SESSION_DIR"] = str(owner / ".pi" / "agent" / "session")
+
+
 # Base directory for isolated sessions
 
 
@@ -1251,6 +1261,7 @@ async def _process_chat(session_id: str, message: str, lease_fd: int) -> str:
                         "Failed to load rpc env_overrides, using empty", exc_info=True
                     )
 
+            _add_activity_observer(rpc_args, rpc_env, session_path)
             try:
                 compact_response = await compact_rpc(
                     [exepath, *rpc_args],
@@ -1338,10 +1349,6 @@ async def _process_chat(session_id: str, message: str, lease_fd: int) -> str:
                 os.path.abspath(os.path.join(session_path, "ENTITY.md")),
             ]
 
-        # Read-only observer: no change to prompting, stdout or process lifetime.
-        bridge = Path(__file__).resolve().parent.parent / "tool" / "activity-bridge.mjs"
-        agent_args += ["--extension", str(bridge)]
-        cmd = [exepath] + agent_args + ["--continue", "-p", message]
         # Add configured global environment variables (shared by all agents)
         env.update(global_env_dict(cfg))
 
@@ -1365,11 +1372,9 @@ async def _process_chat(session_id: str, message: str, lease_fd: int) -> str:
                     "Failed to apply env_overrides, continuing without", exc_info=True
                 )
 
-        # Keep observer ownership outside user-configurable environment merges.
-        owner = Path(session_path).resolve()
-        env["LIMILINK_ACTIVITY_PATH"] = str(owner / ".activity.json")
-        env["LIMILINK_ACTIVITY_OWNER_CWD"] = str(owner)
-        env["LIMILINK_ACTIVITY_SESSION_DIR"] = str(owner / ".pi" / "agent" / "session")
+        # Read-only observer: no change to prompting, stdout or process lifetime.
+        _add_activity_observer(agent_args, env, session_path)
+        cmd = [exepath] + agent_args + ["--continue", "-p", message]
 
         # Append user message to history
         append_to_history(session_path, "user", message)

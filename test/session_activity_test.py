@@ -42,6 +42,95 @@ def recorded(test_sessions_dir):
     return path, snapshot
 
 
+def test_session_observation_whitelist_ancestry_and_revision(recorded):
+    path, snapshot = recorded
+    snapshot["sessionTracking"] = {
+        "available": True,
+        "limited": False,
+        "token": "SECRET",
+    }
+    snapshot["nodes"].append(
+        {
+            "id": "session:child",
+            "parentId": "parent",
+            "label": "Child session 12345678",
+            "kind": "agent",
+            "state": "working",
+            "lastInputTokens": 300,
+            "observation": {
+                "basis": "pi-session-events",
+                "status": "open",
+                "ancestry": "file-reference",
+                "observedAt": 950,
+                "omitted": 2,
+                "modelBasis": "response",
+                "selectedModel": "selected/model",
+                "modelObservedAt": 900,
+                "lastInputObservedAt": 900,
+                "invalidated": "compaction",
+                "sessionFile": "/PRIVATE/journal",
+                "token": "SECRET",
+                "args": {"secret": "SECRET"},
+            },
+        }
+    )
+    snapshot["edges"] = [
+        {
+            "id": "ancestry",
+            "source": "parent",
+            "target": "session:child",
+            "kind": "ancestry",
+            "label": "Header parent file (historical)",
+        }
+    ]
+    path.write_text(json.dumps(snapshot))
+    before = path.read_bytes()
+    result = activity_snapshot(path, True)
+    assert result["available"]
+    assert result["activity"]["sessionTracking"] == {
+        "available": True,
+        "limited": False,
+    }
+    observation = result["activity"]["nodes"][1]["observation"]
+    assert observation["lastInputObservedAt"] == 900
+    assert observation["modelBasis"] == "response"
+    assert observation["invalidated"] == "compaction"
+    assert result["activity"]["edges"][0]["kind"] == "ancestry"
+    assert "SECRET" not in json.dumps(result) and "/PRIVATE" not in json.dumps(result)
+    assert path.read_bytes() == before
+    snapshot["nodes"][1]["observation"]["status"] = "closed"
+    path.write_text(json.dumps(snapshot))
+    assert (
+        activity_snapshot(path, True, result["revision"])["revision"]
+        != result["revision"]
+    )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("basis", "guessed"),
+        ("status", "completed"),
+        ("ancestry", "delegated"),
+        ("omitted", -1),
+        ("modelBasis", "billed"),
+        ("observedAt", float("inf")),
+    ],
+)
+def test_malformed_session_observation_fails_closed(recorded, field, value):
+    path, snapshot = recorded
+    snapshot["nodes"][0]["observation"] = {
+        "basis": "pi-session-events",
+        "status": "open",
+        "ancestry": "unresolved",
+        "observedAt": 1,
+        "omitted": 0,
+        field: value,
+    }
+    path.write_text(json.dumps(snapshot))
+    assert not activity_snapshot(path, False)["available"]
+
+
 def test_activity_assets_are_separate_and_loaded_after_chat():
     with TestClient(main.app) as client:
         html = client.get("/").text
@@ -50,6 +139,117 @@ def test_activity_assets_are_separate_and_loaded_after_chat():
         assert 'href="/activity.css"' in html
         assert client.get("/activity.js").status_code == 200
         assert client.get("/activity.css").status_code == 200
+
+
+def test_usage_summaries_pass_existing_event_contract_without_new_fields(recorded):
+    path, snapshot = recorded
+    label = "Model response · Input 1,234 · Output 56 · Cache read 8,000 · Cache write 0 tokens"
+    snapshot["events"] = [
+        {
+            "id": "usage-1",
+            "at": 999,
+            "kind": "model",
+            "label": label,
+            "nodeId": "parent",
+        }
+    ]
+    path.write_text(json.dumps(snapshot))
+    with TestClient(main.app) as client:
+        result = client.get("/sessions/session_a/activity").json()
+    assert result["available"]
+    assert result["activity"]["events"][0]["label"] == label
+    assert result["activity"]["events"][0]["kind"] == "model"
+
+
+def test_compaction_clears_context_and_changes_poll_revision(recorded):
+    path, snapshot = recorded
+    previous = activity_snapshot(path, False)
+    snapshot["context"] = None
+    snapshot["events"] = [
+        {
+            "id": "compact-1",
+            "at": 1001,
+            "kind": "context",
+            "label": "Context compacted",
+            "nodeId": "parent",
+        }
+    ]
+    path.write_text(json.dumps(snapshot))
+    result = activity_snapshot(path, False, previous["revision"])
+    assert result["available"]
+    assert result["revision"] != previous["revision"]
+    assert result["activity"]["context"] is None
+    assert result["activity"]["nodes"][0]["context"] is None
+    assert result["activity"]["events"][0]["label"] == "Context compacted"
+
+
+@pytest.mark.parametrize(
+    "state", ["running", "finished", "failed", "stopped", "unknown"]
+)
+def test_nested_tool_events_preserve_whitelisted_parent_and_state(recorded, state):
+    path, snapshot = recorded
+    snapshot["events"] = [
+        {
+            "id": "tool:outer",
+            "at": 100,
+            "kind": "tool",
+            "label": "Running codemode",
+            "nodeId": "parent",
+            "state": "running",
+        },
+        {
+            "id": "tool:child",
+            "at": 101,
+            "kind": "tool",
+            "label": "read",
+            "nodeId": "parent",
+            "parentEventId": "tool:outer",
+            "state": state,
+            "args": "SECRET",
+            "result": "SECRET",
+        },
+    ]
+    path.write_text(json.dumps(snapshot))
+    result = activity_snapshot(path, False)
+    assert result["available"]
+    child = result["activity"]["events"][1]
+    assert child["parentEventId"] == "tool:outer"
+    assert child["state"] == state
+    assert "SECRET" not in json.dumps(result)
+    before = result["revision"]
+    snapshot["events"][1]["state"] = "finished" if state != "finished" else "failed"
+    path.write_text(json.dumps(snapshot))
+    assert activity_snapshot(path, False, before)["revision"] != before
+
+
+@pytest.mark.parametrize("extra", [{"parentEventId": "x" * 241}, {"state": "invented"}])
+def test_malformed_nested_metadata_is_unavailable_not_an_execution_error(
+    recorded, extra
+):
+    path, snapshot = recorded
+    snapshot["events"] = [
+        {"id": "tool:x", "at": 100, "kind": "tool", "label": "read", **extra}
+    ]
+    path.write_text(json.dumps(snapshot))
+    assert not activity_snapshot(path, False)["available"]
+
+
+def test_orphan_event_parent_is_not_mistaken_for_an_agent_node_reference(recorded):
+    path, snapshot = recorded
+    snapshot["events"] = [
+        {
+            "id": "tool:child",
+            "at": 100,
+            "kind": "tool",
+            "label": "Finished read",
+            "parentEventId": "tool:evicted",
+            "state": "finished",
+        }
+    ]
+    path.write_text(json.dumps(snapshot))
+    result = activity_snapshot(path, False)
+    assert result["available"]
+    assert result["activity"]["events"][0]["parentEventId"] == "tool:evicted"
 
 
 def test_snapshot_revision_and_whitelist(recorded):
