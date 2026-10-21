@@ -48,6 +48,7 @@ from session_layout import (
 from compact_rpc import CompactRPCError, compact_rpc
 from session_lease import SessionLeaseBusy, pi_lease_command, session_lease
 from session_snapshot import history_snapshot
+from session_activity import activity_snapshot
 from send_receipt import (
     SendConflict,
     SendIndeterminate,
@@ -699,6 +700,24 @@ async def get_session_snapshot(
         ) from exc
 
 
+@app.get("/sessions/{session_id}/activity")
+async def get_session_activity(session_id: str, revision: str | None = None):
+    if session_id != sanitize_session_id(session_id):
+        raise HTTPException(status_code=400, detail="Invalid session ID")
+    cfg, config_dir = load_config()
+    root = Path(get_sessions_dir(cfg, config_dir))
+    with lifecycle_gate:
+        path = root / session_id
+        if not path.is_dir():
+            raise HTTPException(status_code=404, detail="Session no longer exists")
+        busy = session_is_busy(root, session_id)
+        if not busy:
+            with session_lease(root, session_id, exclusive=True) as fd:
+                busy = fd is None
+        result = activity_snapshot(path / ".activity.json", busy, revision)
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
 VALID_REASONING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 
@@ -1319,6 +1338,9 @@ async def _process_chat(session_id: str, message: str, lease_fd: int) -> str:
                 os.path.abspath(os.path.join(session_path, "ENTITY.md")),
             ]
 
+        # Read-only observer: no change to prompting, stdout or process lifetime.
+        bridge = Path(__file__).resolve().parent.parent / "tool" / "activity-bridge.mjs"
+        agent_args += ["--extension", str(bridge)]
         cmd = [exepath] + agent_args + ["--continue", "-p", message]
         # Add configured global environment variables (shared by all agents)
         env.update(global_env_dict(cfg))
@@ -1342,6 +1364,12 @@ async def _process_chat(session_id: str, message: str, lease_fd: int) -> str:
                 logger.debug(
                     "Failed to apply env_overrides, continuing without", exc_info=True
                 )
+
+        # Keep observer ownership outside user-configurable environment merges.
+        owner = Path(session_path).resolve()
+        env["LIMILINK_ACTIVITY_PATH"] = str(owner / ".activity.json")
+        env["LIMILINK_ACTIVITY_OWNER_CWD"] = str(owner)
+        env["LIMILINK_ACTIVITY_SESSION_DIR"] = str(owner / ".pi" / "agent" / "session")
 
         # Append user message to history
         append_to_history(session_path, "user", message)

@@ -876,6 +876,7 @@ async function selectSession(id, closeDrawer = true, focusComposer = false) {
     invalidateSnapshot();
     invalidateReceiptCheck();
     currentSession = id;
+    document.dispatchEvent(new Event('limilink:session'));
     navigationVersion++;
     connected = false;
     showUnconfirmed();

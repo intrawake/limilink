@@ -1,0 +1,47 @@
+#activity-toggle { white-space: nowrap; font-size: 13px; }
+#activity-toggle[aria-expanded="true"] { color: #ffd2ce; border-color: #78505b; background: #302a32; }
+#activity-panel { width: 380px; flex: 0 0 380px; min-height: 0; display: flex; flex-direction: column; background: var(--panel); border-left: 1px solid var(--line); }
+.activity-heading { display: flex; align-items: center; justify-content: space-between; padding: 17px 16px; min-height: 78px; border-bottom: 1px solid var(--line); }
+.activity-heading h2 { font-size: 15px; font-weight: 600; }
+.activity-heading p { color: var(--muted); font-size: 11px; }
+#activity-body { overflow: auto; min-height: 0; padding: 14px 12px 24px; scrollbar-gutter: stable; }
+#activity-status { color: var(--muted); font-size: 12px; margin: 0 2px 14px; }
+#activity-status.activity-stale { color: #d9ba86; }
+#activity-graph { position: relative; min-width: 270px; }
+#activity-graph svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.activity-edge { fill: none; stroke: #777385; stroke-width: 1.5; }
+.activity-edge.communication { stroke: #d9a28f; stroke-dasharray: 4 3; }
+.activity-edge-label { fill: var(--muted); font: 10px system-ui, sans-serif; }
+.activity-node { position: absolute; text-align: left; background: #242831; border: 1px solid #424551; border-radius: 10px; padding: 10px 12px; height: 108px; display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
+.activity-node:hover { background: #2c2f3a; border-color: #777385; }
+.activity-node.selected { border-color: var(--accent); background: #302a32; }
+.activity-node strong { font-size: 13px; font-weight: 600; display: flex; justify-content: space-between; gap: 6px; }
+.activity-node strong span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-node .activity-state { font-size: 10px; font-weight: 500; color: var(--muted); flex-shrink: 0; }
+.activity-node[data-state="running"] .activity-state, .activity-node[data-state="working"] .activity-state { color: #a4d4bb; }
+.activity-node[data-state="failed"] .activity-state, .activity-node[data-state="error"] .activity-state { color: #ffb0a9; }
+.activity-model { color: var(--muted); font: 10px/1.4 ui-monospace, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.activity-meter { height: 4px; background: #3e414d; border-radius: 4px; margin-top: 5px; overflow: hidden; flex-shrink: 0; }
+.activity-meter-fill { display: block; height: 100%; background: #b6a2d5; border-radius: inherit; }
+.activity-meter-fill.near-limit { background: #e5ad7d; }
+.activity-context, .activity-tool { font-size: 10px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.activity-tool { color: #d5d2dd; }
+#activity-detail { margin: 12px 0; padding: 12px; background: #20232b; border: 1px solid var(--line); border-radius: 9px; font-size: 12px; overflow-wrap: anywhere; }
+#activity-detail h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+#activity-detail p { margin: 5px 0; color: var(--muted); }
+#activity-detail .activity-detail-label { color: var(--text); }
+#activity-events { font-size: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+#activity-events summary { color: var(--muted); border-radius: 5px; padding: 5px 2px; }
+#activity-events ol { list-style: none; padding: 0; margin-top: 8px; }
+#activity-events li { padding: 6px 2px; border-bottom: 1px solid #292d36; overflow-wrap: anywhere; }
+#activity-events time { color: var(--muted); display: block; font: 10px ui-monospace, monospace; }
+.activity-legend { font-size: 10px; color: var(--muted); padding: 4px 2px 10px; }
+.activity-legend span { margin-right: 12px; }
+#activity-backdrop { position: fixed; inset: 0; z-index: 11; background: #080a0eb3; border: none; }
+@media (max-width: 1180px) {
+    #activity-panel { position: fixed; inset: 0 0 0 auto; z-index: 12; width: min(400px, calc(100vw - 32px)); }
+}
+@media (max-width: 720px) {
+    #activity-toggle { padding: 6px 8px; }
+    .activity-heading { min-height: 71px; padding: 12px 14px; }
+}

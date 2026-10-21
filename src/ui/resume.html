@@ -7,7 +7,9 @@
     <title>Limilink Proxy</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="/arrange.css">
+    <link rel="stylesheet" href="/activity.css">
     <script src="/follow.js" defer></script>
+    <script src="/activity.js" defer></script>
 </head>
 <body>
     <div id="app">
@@ -31,6 +33,7 @@
                     <h1 id="session-title">Limilink</h1>
                     <span id="session-directory"></span>
                 </div>
+                <button id="activity-toggle" class="quiet-button" aria-controls="activity-panel" aria-expanded="false">Activity</button>
             </header>
             <div id="notice" role="status" hidden></div>
             <div id="connection-status" role="status" hidden></div>
@@ -48,6 +51,20 @@
                 <button id="send-btn" disabled>Send</button>
             </div>
         </main>
+        <button id="activity-backdrop" aria-label="Close activity" tabindex="-1" hidden></button>
+        <aside id="activity-panel" aria-label="Agent activity" hidden>
+            <div class="activity-heading">
+                <div><h2>Activity</h2><p>Agents, context &amp; connections</p></div>
+                <button id="activity-close" class="icon-button" aria-label="Close activity">×</button>
+            </div>
+            <div id="activity-body">
+                <p id="activity-status" role="status">Choose a conversation.</p>
+                <div id="activity-graph" aria-label="Agent graph"></div>
+                <p class="activity-legend"><span>→ Delegation</span><span>⇢ Observed communication</span></p>
+                <section id="activity-detail" aria-label="Selected agent" hidden></section>
+                <details id="activity-events"><summary>Recent activity</summary><ol></ol></details>
+            </div>
+        </aside>
     </div>
     <dialog id="rename-dialog" aria-labelledby="rename-heading">
         <form id="rename-form">
