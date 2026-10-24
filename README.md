@@ -6,6 +6,7 @@ A mobile-friendly web chat interface for the Pi agent harness.
 Run the server:
 ```sh
 pdm install
+pdm run build
 pdm run limilink
 ```
 

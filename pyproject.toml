@@ -55,6 +55,7 @@ preset_server = { shell = "PYTHONPATH=src python src/server.py --config preset/c
 limilink-discord = { shell = "PYTHONPATH=src python demo/discord_bot.py" }
 preset_discord_bot = { shell = "LIMILINK_CONFIG=preset/config.sxpb PYTHONPATH=src python demo/discord_bot.py" }
 test = "pytest"
+build = "python tool/build_svg.py"
 check-format = "ruff check"
 check-type = "ty check"
 lint-sxpb = "sxpb-lint --ignore-file .gitignore"

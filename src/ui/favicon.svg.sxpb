@@ -1,0 +1,16 @@
+;; Authoritative SVG source. Generate XML with pdm run build-svg.
+(svg
+ (@xmlns http://www.w3.org/2000/svg)
+ (@viewBox "7 7 50 50")
+ (@width 256)
+ (@height 256)
+ (($)
+  (title "Limilink")
+  ;; Solid black and coral hooks, white enclosed middle, clear exterior.
+  (path (@id middle) (@d "M16 16H32V24H40V32H48V48H32V40H24V32H16Z") (@fill #fff8f2))
+  (path (@id hook-dark) (@d "M40 8H8V40H24V32H16V16H32V24H40Z") (@fill #1b1e24))
+  (path (@id hook-light) (@d "M40 8H8V40H24V32H16V16H32V24H40Z")
+   (@fill #ff746c) (@transform "rotate(180 32 32)")
+  )
+ )
+)

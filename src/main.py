@@ -1679,6 +1679,16 @@ async def poll_session(session_id: str):
     return {"messages": messages}
 
 
+FAVICON_PATH = Path(__file__).resolve().parents[1] / "dist" / "favicon.svg"
+
+
+@app.get("/favicon.svg", include_in_schema=False)
+async def favicon_svg():
+    if not FAVICON_PATH.is_file():
+        raise HTTPException(status_code=404, detail="Favicon not built")
+    return FileResponse(FAVICON_PATH, media_type="image/svg+xml")
+
+
 # Serve the session sidebar and chat UI.
 static_dir = os.path.join(os.path.dirname(__file__), "ui")
 if os.path.exists(static_dir):

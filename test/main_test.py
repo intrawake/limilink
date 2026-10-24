@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import subprocess
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -658,6 +659,47 @@ def test_sidebar_assets_use_correct_create_endpoint():
     assert post_lines
     for line in post_lines:
         assert "'/sessions/' +" not in line
+
+
+def test_favicon_links_and_assets(tmp_path, monkeypatch):
+    import main
+    from tool import build_svg
+
+    output = tmp_path / "dist" / "favicon.svg"
+    output.parent.mkdir()
+    output.write_text(build_svg.compile_svg(build_svg.SOURCE))
+    monkeypatch.setattr(main, "FAVICON_PATH", output)
+    html = client.get("/").text
+    assert html.count('rel="icon"') == 1
+    assert 'href="/favicon.svg?v=12" type="image/svg+xml"' in html
+    assert "favicon.png" not in html
+    assert client.get("/favicon.png").status_code == 404
+    assert client.get("/favicon-options/index.html").status_code == 404
+    response = client.get("/favicon.svg?v=12")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/svg+xml")
+    svg = ET.fromstring(response.content)
+    assert svg.tag == "{http://www.w3.org/2000/svg}svg"
+    namespace = "{http://www.w3.org/2000/svg}"
+    assert svg.get("viewBox") == "7 7 50 50"
+    assert svg.find(f"{namespace}rect") is None
+    assert svg.find(f"{namespace}defs") is None
+    paths = svg.findall(f"{namespace}path")
+    assert [path.get("id") for path in paths] == [
+        "middle",
+        "hook-dark",
+        "hook-light",
+    ]
+    assert [path.get("fill") for path in paths] == [
+        "#fff8f2",
+        "#1b1e24",
+        "#ff746c",
+    ]
+    assert paths[0].get("d") == "M16 16H32V24H40V32H48V48H32V40H24V32H16Z"
+    assert paths[1].get("d") == "M40 8H8V40H24V32H16V16H32V24H40Z"
+    assert paths[1].get("d") == paths[2].get("d")
+    assert paths[2].get("transform") == "rotate(180 32 32)"
+    assert all(path.get("stroke") is None for path in paths)
 
 
 @pytest.mark.asyncio
