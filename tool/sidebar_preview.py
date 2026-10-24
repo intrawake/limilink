@@ -21,7 +21,15 @@ def main():
         action="store_true",
         help="Use delayed local echo replies for browser live-update checks",
     )
+    parser.add_argument(
+        "--history-size",
+        type=int,
+        default=1,
+        help="Seed this many messages in session_c for recent-history checks (1–5000)",
+    )
     args = parser.parse_args()
+    if not 1 <= args.history_size <= 5000:
+        parser.error("--history-size must be between 1 and 5000")
     with tempfile.TemporaryDirectory(prefix="limilink-sidebar-") as directory:
         root = Path(directory)
         sessions = root / "sessions"
@@ -31,6 +39,18 @@ def main():
             session.mkdir()
             (session / "chat_history.json").write_text(
                 json.dumps([{"role": "bot", "content": f"History {suffix.upper()}"}])
+            )
+        if args.history_size > 1:
+            long_history = [{"role": "bot", "content": "History C"}] + [
+                {
+                    "role": "bot" if index % 2 else "user",
+                    "content": f"Fixture message {index}: "
+                    + "Long conversation text. " * 12,
+                }
+                for index in range(1, args.history_size)
+            ]
+            (sessions / "session_c" / "chat_history.json").write_text(
+                json.dumps(long_history)
             )
         (sessions / ".session-layout.json").write_text(
             json.dumps(

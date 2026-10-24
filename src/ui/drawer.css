@@ -49,7 +49,12 @@ input { background: var(--input); color: inherit; border: 1px solid var(--line);
 .session-name { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 14px; }
 .session-id { display: block; color: var(--muted); font: 11px/1.5 ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-row.selected .session-name { color: #ffd5d0; }
-.session-row.busy .session-name::after { content: " ···"; color: var(--accent); }
+.session-row.busy:not(.status-slotted) .session-name::after { content: " ⏳"; color: var(--accent); }
+.session-status { grid-column: 2; grid-row: 1; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; max-width: 146px; gap: 4px 6px; white-space: nowrap; }
+.session-working { display: inline-block; font-size: 16px; line-height: 1.25; }
+.session-unread { color: #251b20; background: var(--accent); border-radius: 9px; padding: 1px 6px; font-size: 11px; font-weight: 650; }
+.session-row.unread .session-name { font-weight: 650; }
+.load-older { align-self: center; flex-shrink: 0; margin: 0 auto 12px; }
 .session-link { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 6px; }
 .session-name { grid-column: 1; grid-row: 1; }
 .session-id { grid-column: 1 / -1; grid-row: 2; }
@@ -57,7 +62,7 @@ input { background: var(--input); color: inherit; border: 1px solid var(--line);
 .session-menu { flex-shrink: 0; align-self: stretch; display: flex; align-items: center; }
 .session-menu summary { list-style: none; padding: 12px 9px; border-radius: 7px; font-size: 18px; }
 .session-menu summary::-webkit-details-marker { display: none; }
-.menu-items { position: absolute; z-index: 3; right: 4px; top: 40px; min-width: 150px; padding: 5px; background: #282c34; border: 1px solid #4b505c; border-radius: 9px; box-shadow: 0 8px 25px #0008; }
+.menu-items { position: absolute; z-index: 3; right: 4px; top: 100%; min-width: 150px; padding: 5px; background: #282c34; border: 1px solid #4b505c; border-radius: 9px; box-shadow: 0 8px 25px #0008; }
 .menu-items button { display: block; width: 100%; background: none; text-align: left; padding: 8px 10px; border-radius: 5px; }
 .menu-items button:hover { background: #3a3e49; }
 .trash-button { background: none; color: var(--muted); flex-shrink: 0; min-width: 32px; min-height: 36px; border-radius: 7px; font-size: 18px; }

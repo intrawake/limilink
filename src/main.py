@@ -47,7 +47,7 @@ from session_layout import (
 
 from compact_rpc import CompactRPCError, compact_rpc
 from session_lease import SessionLeaseBusy, pi_lease_command, session_lease
-from session_snapshot import history_snapshot
+from session_snapshot import cached_reply_evidence, history_snapshot
 from session_activity import activity_snapshot
 from send_receipt import (
     SendConflict,
@@ -450,6 +450,27 @@ async def session_sidebar():
         ) from exc
 
 
+@app.get("/session-replies")
+def session_replies(session_id: list[str] = Query(min_length=1, max_length=8)):
+    """Bounded, read-only offscreen evidence; blocking file work stays off-loop."""
+    if any(
+        not key or len(key) > 255 or key != sanitize_session_id(key)
+        for key in session_id
+    ):
+        raise HTTPException(status_code=400, detail="Invalid session ID")
+    cfg, config_dir = load_config()
+    root = Path(get_sessions_dir(cfg, config_dir))
+    replies = {}
+    for key in dict.fromkeys(session_id):
+        path = root / key
+        replies[key] = (
+            cached_reply_evidence(path / "chat_history.json")
+            if path.is_dir()
+            else {"state": "unknown"}
+        )
+    return JSONResponse({"replies": replies}, headers={"Cache-Control": "no-store"})
+
+
 @app.post("/sessions/{session_id}/trash")
 async def trash_session(session_id: str):
     if session_id != sanitize_session_id(session_id):
@@ -681,7 +702,9 @@ async def get_session_snapshot(
             path = root / session_id
             if not path.is_dir():
                 raise HTTPException(status_code=404, detail="Session no longer exists")
-            result = history_snapshot(path / "chat_history.json", revision)
+            result = history_snapshot(
+                path / "chat_history.json", revision, with_reply=True
+            )
             root_id = str(root.resolve())
             active = {
                 key

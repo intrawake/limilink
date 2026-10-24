@@ -24,6 +24,13 @@ let snapshotSequence = 0;
 let sendGeneration = 0;
 let activeSnapshot = null;
 let activeReceiptCheck = null;
+let activeReplyCheck = null;
+let replyCursor = 0;
+let replyReadFrame = null;
+let replies = null;
+let historyView = null;
+let displayedReply = null;
+let replyTrackingAvailable = false;
 let backgroundReceiptCursor = 0;
 let pollTimer = null;
 let connected = false;
@@ -113,6 +120,7 @@ function setDrawer(open, returnFocus = true) {
     byId('sidebar-toggle').setAttribute('aria-expanded', String(open));
     sidebar.inert = mobile.matches && !open;
     conversation.inert = open;
+    if (!open) scheduleReplyRead();
     if (open) {
         sidebar.setAttribute('role', 'dialog');
         sidebar.setAttribute('aria-modal', 'true');
@@ -159,10 +167,11 @@ function renderSessions() {
     for (const session of sessions) {
         const index = sessions.findIndex(item => item.id === session.id);
         const row = document.createElement('li');
-        row.className = 'session-row';
+        row.className = 'session-row status-slotted';
         row.dataset.sessionId = session.id;
         row.classList.toggle('selected', session.id === currentSession);
         row.classList.toggle('busy', serverBusy.has(session.id));
+        row.classList.toggle('unread', !!replies?.isUnread(session.id));
         row.classList.toggle('trashed', isTrashed(session.id));
         const handle = document.createElement('button');
         handle.className = 'drag-handle';
@@ -197,13 +206,22 @@ function renderSessions() {
             directory.dataset.deleteAt = session.delete_at;
         }
         link.append(name, directory);
+        const status = document.createElement('span');
+        status.className = 'session-status';
+        const badge = (text, className, label) => {
+            const node = document.createElement('span');
+            node.className = className;
+            node.textContent = text;
+            node.title = label;
+            node.setAttribute('role', 'status');
+            node.setAttribute('aria-label', label);
+            status.append(node);
+        };
+        if (serverBusy.has(session.id)) badge('⏳', 'session-working', 'Working');
+        if (replies?.isUnread(session.id)) badge('New', 'session-unread', 'Unread reply');
         const delivery = deliveryStatus(session.id);
-        if (delivery) {
-            const status = document.createElement('span');
-            status.className = 'session-delivery';
-            status.textContent = delivery;
-            link.append(status);
-        }
+        if (delivery) badge(delivery, 'session-delivery', delivery);
+        if (status.childNodes.length) link.append(status);
         link.addEventListener('click', event => {
             if (namePress?.active || (releaseClick && event.detail)) { event.preventDefault(); return; }
             selectSession(session.id, true, true);
@@ -601,20 +619,7 @@ function trackChatScroll() {
 }
 
 function appendMessage(content, sender, scroll = true) {
-    chat.querySelector('.empty-conversation')?.remove();
-    const message = document.createElement('div');
-    message.className = `message ${sender === 'user' ? 'user' : 'bot'}`;
-    const parts = String(content).split(/```([\s\S]*?)```/g);
-    parts.forEach((part, index) => {
-        if (index % 2) {
-            const pre = document.createElement('pre');
-            const code = document.createElement('code');
-            code.textContent = part;
-            pre.append(code);
-            message.append(pre);
-        } else { message.append(document.createTextNode(part)); }
-    });
-    chat.append(message);
+    historyView.append(content, sender);
     if (scroll) pinChatToBottom();
 }
 
@@ -696,12 +701,7 @@ function saveFailedSend(id, request, detail) {
 
 function renderHistory(history, followBottom = isScrolledToBottom) {
     const scrollTop = chat.scrollTop;
-    chat.replaceChildren();
-    if (history.length) {
-        for (const item of history) appendMessage(item.content, item.role, false);
-    } else {
-        emptyConversation('New conversation', 'Start a conversation when you’re ready.');
-    }
+    historyView.render(history, pendingSends.has(currentSession));
     if (followBottom) pinChatToBottom();
     else {
         chat.scrollTop = scrollTop;
@@ -759,7 +759,10 @@ async function syncSnapshot({ initial = false, recover = false, force = false, r
                 throw new Error('The server returned an incomplete conversation state.');
             }
             const changed = !cached || cached.revision !== data.revision;
-            historyCache.set(id, { revision: data.revision, history });
+            const reply = canonicalReply(data.reply, history);
+            replyTrackingAvailable = !!reply;
+            const unreadChanged = replies?.observe(id, reply) || false;
+            historyCache.set(id, { revision: data.revision, history, reply });
             const nextBusy = new Set(data.busy_sessions || []);
             if (data.busy) nextBusy.add(id);
             const busyChanged = nextBusy.size !== serverBusy.size || [...nextBusy].some(key => !serverBusy.has(key));
@@ -770,7 +773,9 @@ async function syncSnapshot({ initial = false, recover = false, force = false, r
             historyReady = true;
             connected = true;
             connectionStatus();
-            if (busyChanged || reconciled) renderSessions();
+            displayedReply = reply ? { ...reply, id } : null;
+            scheduleReplyRead();
+            if (busyChanged || reconciled || unreadChanged) renderSessions();
             updateInputState();
             return true;
         } catch (error) {
@@ -811,11 +816,95 @@ async function loadHistory(id) {
     historyReady = false;
     connected = false;
     const cached = historyCache.get(id);
-    if (cached) renderHistory(cached.history, true);
+    if (cached) {
+        renderHistory(cached.history, true);
+        displayedReply = cached.reply ? { ...cached.reply, id } : null;
+        scheduleReplyRead();
+    }
     else emptyConversation('Loading conversation…');
     chat.setAttribute('aria-busy', 'true');
     updateInputState();
     return syncSnapshot({ initial: true, force: true });
+}
+
+
+function canonicalReply(value, history) {
+    const reply = globalThis.LimilinkReplies?.evidence(value);
+    if (!reply) return null;
+    let index = null;
+    for (let i = history.length - 1; i >= 0; --i) {
+        if (history[i].role === 'bot') { index = i; break; }
+    }
+    return reply.index === index ? reply : null;
+}
+
+function cancelReplyRead() {
+    if (replyReadFrame !== null) cancelAnimationFrame(replyReadFrame);
+    replyReadFrame = null;
+}
+
+function scheduleReplyRead() {
+    if (!replies || !displayedReply || displayedReply.token === null) return;
+    cancelReplyRead();
+    const shown = displayedReply, navigation = navigationVersion;
+    replyReadFrame = requestAnimationFrame(() => {
+        replyReadFrame = null;
+        if (shown !== displayedReply || navigation !== navigationVersion || shown.id !== currentSession
+            || document.visibilityState !== 'visible' || !document.hasFocus()
+            || conversation.inert || conversation.closest('[inert]') || document.querySelector('dialog[open]')
+            || Math.max(0, chat.scrollHeight - chat.clientHeight - chat.scrollTop) >= 10) return;
+        const node = historyView?.nodeAt(shown.index);
+        if (!node || shown.token === null) return;
+        const box = node.getBoundingClientRect(), viewport = chat.getBoundingClientRect();
+        const top = Math.max(box.top, viewport.top, 0), bottom = Math.min(box.bottom, viewport.bottom, window.innerHeight);
+        const left = Math.max(box.left, viewport.left, 0), right = Math.min(box.right, viewport.right, window.innerWidth);
+        if (bottom <= top || right <= left) return;
+        const exposed = document.elementFromPoint((left + right) / 2, (top + bottom) / 2);
+        if (!exposed || !node.contains(exposed)) return;
+        if (replies.markRead(shown.id, shown.token)) renderSessions();
+    });
+}
+
+function invalidateReplyCheck() {
+    if (!activeReplyCheck) return;
+    clearTimeout(activeReplyCheck.timeout);
+    activeReplyCheck.controller.abort();
+    activeReplyCheck = null;
+}
+
+async function syncReplyBatch() {
+    if (!replies || !replyTrackingAvailable || document.visibilityState !== 'visible') return false;
+    if (activeReplyCheck) return activeReplyCheck.promise;
+    const ids = sessions.filter(session => session.id !== currentSession && session.delete_at === undefined).map(session => session.id);
+    if (!ids.length) return false;
+    const count = Math.min(8, ids.length), start = replyCursor % ids.length;
+    const batch = Array.from({ length: count }, (_, i) => ids[(start + i) % ids.length]);
+    replyCursor = (start + count) % ids.length;
+    const navigation = navigationVersion, controller = new AbortController();
+    const request = { controller, timeout: setTimeout(() => controller.abort(), 8000), promise: null };
+    activeReplyCheck = request;
+    request.promise = (async () => {
+        try {
+            const query = new URLSearchParams();
+            batch.forEach(id => query.append('session_id', id));
+            const data = await api('/session-replies?' + query, { signal: controller.signal });
+            if (activeReplyCheck !== request || controller.signal.aborted || navigation !== navigationVersion
+                || document.visibilityState !== 'visible' || !data.replies || typeof data.replies !== 'object') return false;
+            let changed = false;
+            for (const id of batch) {
+                if (id !== currentSession && sessions.some(session => session.id === id && session.delete_at === undefined)) {
+                    changed = replies.observe(id, data.replies[id]) || changed;
+                }
+            }
+            if (changed) renderSessions();
+            return true;
+        } catch { return false; } // Old servers/unknown evidence never clear unread or disconnect chat.
+        finally {
+            clearTimeout(request.timeout);
+            if (activeReplyCheck === request) activeReplyCheck = null;
+        }
+    })();
+    return request.promise;
 }
 
 function invalidateReceiptCheck() {
@@ -870,6 +959,7 @@ async function syncBackgroundReceipt() {
 function pollUpdates(options = {}) {
     syncSnapshot(options);
     syncBackgroundReceipt();
+    syncReplyBatch();
 }
 
 function startPolling() {
@@ -884,6 +974,8 @@ function pauseUpdates() {
     pollTimer = null;
     invalidateSnapshot();
     invalidateReceiptCheck();
+    invalidateReplyCheck();
+    cancelReplyRead();
     for (const request of pendingSends.values()) request.needsRecovery = true;
 }
 
@@ -891,6 +983,7 @@ function resumeUpdates() {
     if (document.visibilityState !== 'visible') return;
     startPolling();
     pollUpdates({ force: true, recover: true });
+    scheduleReplyRead();
 }
 
 function usesMobileKeyboard() {
@@ -912,6 +1005,10 @@ async function selectSession(id, closeDrawer = true, focusComposer = false) {
     if (currentSession) drafts.set(currentSession, input.value);
     invalidateSnapshot();
     invalidateReceiptCheck();
+    invalidateReplyCheck();
+    cancelReplyRead();
+    displayedReply = null;
+    historyView?.reset();
     currentSession = id;
     document.dispatchEvent(new Event('limilink:session'));
     navigationVersion++;
@@ -1003,6 +1100,9 @@ function resizeInput() {
     if (input.value) input.style.height = `${input.scrollHeight}px`;
 }
 
+window.addEventListener('storage', event => {
+    if (replies?.storageEvent(event.key, event.newValue)) renderSessions();
+});
 byId('new-session-btn').addEventListener('click', createSession);
 byId('refresh-sessions').addEventListener('click', () => refreshSessions());
 byId('sidebar-toggle').addEventListener('click', () => setDrawer(true));
@@ -1038,20 +1138,23 @@ input.addEventListener('keydown', event => {
         sendMessage();
     }
 });
-chat.addEventListener('scroll', trackChatScroll);
+chat.addEventListener('scroll', () => { trackChatScroll(); scheduleReplyRead(); });
 new ResizeObserver(() => {
     if (isScrolledToBottom) pinChatToBottom();
     else chatGeometry = measureChatGeometry();
+    scheduleReplyRead();
 }).observe(chat);
 window.visualViewport?.addEventListener('resize', () => {
     if (isScrolledToBottom) pinChatToBottom();
 });
 document.addEventListener('click', event => {
+    scheduleReplyRead();
     if (!event.target.closest('.session-menu')) {
         for (const menu of sessionList.querySelectorAll('details')) menu.open = false;
     }
 });
 document.addEventListener('keydown', event => {
+    scheduleReplyRead();
     if (renameDialog.open || !app.classList.contains('sidebar-open')) return;
     if (event.key === 'Escape') { event.preventDefault(); setDrawer(false); }
     if (event.key === 'Tab') {
@@ -1066,11 +1169,20 @@ async function initialize() {
     setDrawer(false, false);
     setSidebarBusy(true);
     try {
+        await Promise.all([
+            globalThis.LimilinkHistory ? null : import('/history-view.js?v=1'),
+            globalThis.LimilinkReplies ? null : import('/reply-state.js?v=1'),
+        ]);
+        replies = globalThis.LimilinkReplies.create();
+        historyView = globalThis.LimilinkHistory.create(chat, {
+            empty: () => emptyConversation('New conversation', 'Start a conversation when you’re ready.'),
+            onPrepend: () => { isScrolledToBottom = false; chatGeometry = measureChatGeometry(); scheduleReplyRead(); },
+        });
         await readSessions();
         const last = savedSession();
         if (sessions.length) await selectSession(sessions.some(session => session.id === last) ? last : sessions[0].id, false);
     } catch (error) { notice(`Could not load sessions: ${error.message}`); }
-    finally { setSidebarBusy(false); startPolling(); }
+    finally { setSidebarBusy(false); startPolling(); syncReplyBatch(); }
     if (!sessions.length && !byId('notice').textContent) await createSession();
 }
 initialize();
