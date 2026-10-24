@@ -9,7 +9,7 @@ async page => {
         const body = await (await page.request.get(base + '/steady.js')).text();
         await page.route('**/follow.js', route => route.fulfill({ body, contentType: 'text/javascript' }));
         const html = (await (await page.request.get(page.url())).text())
-            .replace('    <script src="/history-view.js?v=1" defer></script>\n', '')
+            .replace('    <script src="/history-view.js?v=2" defer></script>\n', '')
             .replace('    <script src="/reply-state.js?v=1" defer></script>\n', '')
             .replace('</body>', '<button id="rename-current" hidden>Rename</button></body>');
         await page.route('**/?controller=steady', route => route.fulfill({ body: html, contentType: 'text/html' }));

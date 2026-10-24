@@ -6,6 +6,81 @@
     const isPrefix = (before, after) => before.length <= after.length
         && before.every((item, index) => same(item, after[index]));
 
+    // Recognize two inline link forms, not HTML or a full Markdown grammar.
+    function linkParts(text, base) {
+        if (!/[\[<]/.test(text)) return [{ text }];
+        const escaped = new Set(), runs = [];
+        for (let i = 0; i < text.length; i++) {
+            if (text[i] === '\\') { if (i + 1 < text.length) escaped.add(++i); }
+            else if (text[i] === '`') {
+                let end = i + 1;
+                while (text[end] === '`') end++;
+                runs.push([i, end - i]); i = end - 1;
+            }
+        }
+        const code = new Map(), nextRun = new Map();
+        for (let i = runs.length - 1; i >= 0; i--) {
+            const [start, count] = runs[i], end = nextRun.get(count);
+            if (end !== undefined) code.set(start, end + count);
+            else if (count >= 3) code.set(start, text.length); // Unfinished fence stays literal.
+            nextRun.set(count, start);
+        }
+        const angles = new Map();
+        for (const match of text.matchAll(/<[^<>\r\n]*>/g)) {
+            if (!escaped.has(match.index)) angles.set(match.index, match.index + match[0].length);
+        }
+        const partners = new Map(), brackets = [], parentheses = [];
+        for (let i = 0; i < text.length; i++) {
+            if (escaped.has(i)) continue;
+            const opaque = code.get(i) ?? angles.get(i);
+            if (opaque !== undefined) { i = opaque - 1; continue; }
+            if (text[i] === '[') brackets.push(i);
+            else if (text[i] === ']' && brackets.length) partners.set(brackets.pop(), i);
+            else if (text[i] === '(') parentheses.push(i);
+            else if (text[i] === ')' && parentheses.length) partners.set(parentheses.pop(), i);
+        }
+        const href = raw => {
+            if (!raw || /[\s\u0000-\u001f\u007f\\]/.test(raw)) return null;
+            try {
+                const url = new URL(raw, base);
+                return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
+            } catch { return null; }
+        };
+        const parts = [];
+        let plain = 0;
+        const add = (start, end, label, destination) => {
+            const url = href(destination);
+            if (!url) return;
+            if (start > plain) parts.push({ text: text.slice(plain, start) });
+            parts.push({ text: label, href: url }); plain = end;
+        };
+        for (let i = 0; i < text.length; i++) {
+            if (escaped.has(i)) continue;
+            const literal = code.get(i);
+            if (literal !== undefined) { i = literal - 1; continue; }
+            const angle = angles.get(i);
+            if (angle !== undefined) {
+                const raw = text.slice(i + 1, angle - 1);
+                if (/^https?:\/\//i.test(raw)) add(i, angle, raw, raw);
+                i = angle - 1; continue;
+            }
+            if (text[i] !== '[') continue;
+            const labelEnd = partners.get(i), open = labelEnd === undefined ? -1 : labelEnd + 1;
+            const end = text[open] === '(' ? partners.get(open) : undefined;
+            if (end === undefined) continue;
+            // Consume whole candidates, including images and rejected URLs: no nested retries.
+            if (!(text[i - 1] === '!' && !escaped.has(i - 1))) {
+                const label = text.slice(i + 1, labelEnd);
+                let destination = text.slice(open + 1, end);
+                if (destination.startsWith('<') && destination.endsWith('>')) destination = destination.slice(1, -1);
+                if (label && !/[\r\n]/.test(label)) add(i, end + 1, label, destination);
+            }
+            i = end;
+        }
+        if (plain < text.length || !parts.length) parts.push({ text: text.slice(plain) });
+        return parts;
+    }
+
     function message(item) {
         const node = document.createElement('div');
         node.className = `message ${item.role === 'user' ? 'user' : 'bot'}`;
@@ -16,7 +91,17 @@
                 code.textContent = part;
                 pre.append(code);
                 node.append(pre);
-            } else node.append(document.createTextNode(part));
+            } else for (const piece of linkParts(part, document.baseURI)) {
+                if (!piece.href) node.append(document.createTextNode(piece.text));
+                else {
+                    const link = document.createElement('a');
+                    link.textContent = piece.text;
+                    link.href = piece.href;
+                    link.target = '_blank';
+                    link.rel = 'noopener noreferrer';
+                    node.append(link);
+                }
+            }
         });
         return node;
     }
@@ -115,5 +200,5 @@
             start() { return start; },
         };
     }
-    globalThis.LimilinkHistory = { create, isPrefix, pageSize: PAGE };
+    globalThis.LimilinkHistory = { version: 2, create, isPrefix, linkParts, pageSize: PAGE };
 })();

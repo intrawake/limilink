@@ -1170,7 +1170,7 @@ async function initialize() {
     setSidebarBusy(true);
     try {
         await Promise.all([
-            globalThis.LimilinkHistory ? null : import('/history-view.js?v=1'),
+            globalThis.LimilinkHistory?.version === 2 ? null : import('/history-view.js?v=2'),
             globalThis.LimilinkReplies ? null : import('/reply-state.js?v=1'),
         ]);
         replies = globalThis.LimilinkReplies.create();
