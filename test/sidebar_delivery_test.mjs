@@ -22,7 +22,7 @@ async function controller(name) {
     notice = () => { warnings++; };
     sessions = [{ id: 'session_a' }, { id: 'session_b' }, { id: 'session_c' }];
     currentSession = 'session_c'; connected = true; historyReady = true;
-    function submission(id) { return { id, text: 'Preserved text ' + id, needsRecovery: false, observedBusy: false }; }
+    function submission(id) { return { id, text: 'Preserved text ' + id, needsRecovery: false, accepted: false, settled: false }; }
   `, context);
   return code => vm.runInContext(code, context);
 }
@@ -32,7 +32,7 @@ for (const name of ['follow', 'steady']) {
     const run = await controller(name);
     await run(`(async () => {
       const missing = submission('a0'), later = submission('a1'), failed = submission('b0');
-      unconfirmedSends.set('session_a', [missing, later]); pendingSends.set('session_b', failed);
+      unconfirmedSends.set('session_a', [missing, later]); addPending('session_b', failed);
       serverBusy.add('session_c');
       let calls = [];
       api = async path => {
@@ -54,7 +54,7 @@ for (const name of ['follow', 'steady']) {
   test(`${name}: concurrent checks coalesce, pause cancels, late response cannot reconcile`, async () => {
     const run = await controller(name);
     await run(`(async () => {
-      const send = submission('a0'); pendingSends.set('session_a', send);
+      const send = submission('a0'); addPending('session_a', send);
       let calls = 0, release, signal;
       api = (path, options) => { calls++; signal = options.signal; return new Promise(resolve => { release = resolve; }); };
       const first = syncBackgroundReceipt(), second = syncBackgroundReceipt();
@@ -62,7 +62,7 @@ for (const name of ['follow', 'steady']) {
       pauseUpdates();
       if (!signal.aborted || activeReceiptCheck !== null || pollTimer !== null || !send.needsRecovery) throw Error('Pause did not cancel lifecycle');
       release({ revision: 'r', busy: false, send: { id: 'a0', state: 'complete', outcome: { status: 200, body: { reply: 'Saved' } } } });
-      if (await first || await second || pendingSends.get('session_a') !== send || renders) throw Error('Cancelled response mutated state');
+      if (await first || await second || !isPending('session_a', send) || renders) throw Error('Cancelled response mutated state');
       document.visibilityState = 'hidden';
       await syncBackgroundReceipt();
       if (calls !== 1) throw Error('Hidden page started extra GET');
@@ -72,15 +72,15 @@ for (const name of ['follow', 'steady']) {
   test(`${name}: malformed/mismatched receipts and GET errors never imply completion`, async () => {
     const run = await controller(name);
     await run(`(async () => {
-      const send = submission('a0'); pendingSends.set('session_a', send);
+      const send = submission('a0'); addPending('session_a', send);
       api = async () => ({ revision: 'r', busy: false, send: { id: 'other', state: 'complete', outcome: { status: 200, body: { reply: 'Not ours' } } } });
       await syncBackgroundReceipt();
-      if (pendingSends.get('session_a') !== send || deliveryStatus('session_a') !== 'Sending…') throw Error('Wrong ID acknowledged or idle means working');
+      if (!isPending('session_a', send) || deliveryStatus('session_a') !== 'Sending…') throw Error('Wrong ID acknowledged or idle means working');
       api = async () => ({ revision: 'r', busy: false, send: { id: 'a0', state: 'complete', outcome: { status: 200, body: {} } } });
       if (await syncBackgroundReceipt()) throw Error('Malformed complete receipt accepted');
       api = async () => { throw Error('Network unavailable'); };
       await syncBackgroundReceipt();
-      if (pendingSends.get('session_a') !== send || unconfirmedSends.size || !connected || !historyReady || warnings) throw Error('Offscreen error changed selected/delivery state');
+      if (!isPending('session_a', send) || unconfirmedSends.size || !connected || !historyReady || warnings) throw Error('Offscreen error changed selected/delivery state');
     })()`);
   });
 

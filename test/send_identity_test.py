@@ -34,7 +34,9 @@ def root(test_sessions_dir):
 def calls(root, monkeypatch):
     calls = []
 
-    async def fake_chat(session_id: str, message: str, lease_fd: int) -> str:
+    async def fake_chat(
+        session_id: str, message: str, lease_fd: int, request_id=None
+    ) -> str:
         calls.append((session_id, message))
         main.append_to_history(str(root / session_id), "user", message)
         main.append_to_history(str(root / session_id), "bot", f"reply: {message}")
@@ -57,7 +59,7 @@ async def test_concurrent_and_completed_replay_invoke_chat_once(root):
     started, release = asyncio.Event(), asyncio.Event()
     calls = []
 
-    async def blocked(session_id, message, lease_fd):
+    async def blocked(session_id, message, lease_fd, request_id=None):
         calls.append(message)
         main.append_to_history(str(root / session_id), "user", message)
         started.set()

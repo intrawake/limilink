@@ -84,6 +84,7 @@
     function message(item) {
         const node = document.createElement('div');
         node.className = `message ${item.role === 'user' ? 'user' : 'bot'}`;
+        if (item.role === 'user' && validSendId(item.request_id)) node.dataset.requestId = item.request_id;
         String(item.content).split(/```([\s\S]*?)```/g).forEach((part, index) => {
             if (index % 2) {
                 const pre = document.createElement('pre');
@@ -106,99 +107,127 @@
         return node;
     }
 
+    const validSendId = id => typeof id === 'string' && /^[0-9a-f]{32}$/.test(id);
+    function canonicalSendIds(items) {
+        const counts = new Map();
+        for (const item of items) if (item.role === 'user' && validSendId(item.request_id)) {
+            counts.set(item.request_id, (counts.get(item.request_id) || 0) + 1);
+        }
+        return new Set([...counts].filter(([, count]) => count === 1).map(([id]) => id));
+    }
+
     function create(chat, { empty, onPrepend }) {
-        let history = [], nodes = [], transients = [], start = 0, initialized = false;
+        let history = [], nodes = [], start = 0, initialized = false;
+        const transients = new Map();
         let emptyNode = null;
         const older = document.createElement('button');
-        older.type = 'button';
-        older.className = 'quiet-button load-older';
+        older.type = 'button'; older.className = 'quiet-button load-older';
         older.textContent = 'Load older';
         older.setAttribute('aria-label', 'Load older messages');
         const clearTransients = () => {
-            const changed = transients.length > 0;
-            transients.forEach(node => node.remove());
-            transients = [];
+            const changed = transients.size > 0;
+            for (const node of transients.values()) node.remove();
+            transients.clear();
             return changed;
         };
         const fragment = items => {
-            const result = document.createDocumentFragment();
-            const added = items.map(message);
+            const result = document.createDocumentFragment(), added = items.map(message);
             for (const node of added) result.append(node);
             return { result, added };
+        };
+        const syncOptimistic = (next, records) => {
+            const recorded = canonicalSendIds(next), wanted = new Map();
+            for (const item of records) if (validSendId(item.id) && typeof item.text === 'string' && !recorded.has(item.id)) {
+                wanted.set(item.id, item);
+            }
+            let changed = false;
+            for (const [id, node] of transients) if (!wanted.has(id)) {
+                node.remove(); transients.delete(id); changed = true;
+            }
+            if (wanted.size) { emptyNode?.remove(); emptyNode = null; }
+            let previous = nodes.at(-1) || older;
+            for (const [id, item] of wanted) {
+                let node = transients.get(id);
+                if (!node) {
+                    node = message({ role: 'user', content: item.text });
+                    node.dataset.requestId = id;
+                    transients.set(id, node); changed = true;
+                }
+                if (node.parentNode !== chat || previous.nextSibling !== node) {
+                    previous.after(node); changed = true;
+                }
+                previous = node;
+            }
+            return changed;
         };
         older.addEventListener('click', () => {
             if (!start) return;
             const top = chat.getBoundingClientRect().top;
             const anchor = nodes.find(node => node.getBoundingClientRect().bottom > top) || nodes[0];
-            const before = anchor.getBoundingClientRect().top;
-            const scroll = chat.scrollTop;
+            const before = anchor.getBoundingClientRect().top, scroll = chat.scrollTop;
             const anchoring = chat.style.overflowAnchor;
             chat.style.overflowAnchor = 'none';
             const nextStart = Math.max(0, start - PAGE);
             const { result, added } = fragment(history.slice(nextStart, start));
-            older.after(result);
-            nodes.unshift(...added);
-            start = nextStart;
+            older.after(result); nodes.unshift(...added); start = nextStart;
             older.hidden = start === 0;
             chat.scrollTop = scroll + anchor.getBoundingClientRect().top - before;
             chat.style.overflowAnchor = anchoring;
             if (older.hidden && document.activeElement === older) {
-                anchor.tabIndex = -1;
-                anchor.focus({ preventScroll: true });
+                anchor.tabIndex = -1; anchor.focus({ preventScroll: true });
             }
             onPrepend();
         });
         return {
             reset() {
-                history = []; nodes = []; transients = []; start = 0;
+                history = []; nodes = []; transients.clear(); start = 0;
                 emptyNode = null; initialized = false;
             },
-            render(next, preserveOptimistic = false) {
-                const prefix = isPrefix(history, next);
-                const reuse = initialized && older.parentNode === chat && prefix;
+            render(next, optimistic = false) {
+                const exact = Array.isArray(optimistic);
+                const reuse = initialized && older.parentNode === chat && isPrefix(history, next);
                 let changed = false;
                 if (reuse) {
-                    if (next.length !== history.length || !preserveOptimistic) changed = clearTransients();
+                    // Boolean mode remains compatible with old cached controllers.
+                    if (!exact && (next.length !== history.length || !optimistic)) changed = clearTransients();
                     if (next.length > history.length) {
                         emptyNode?.remove(); emptyNode = null;
                         const { result, added } = fragment(next.slice(history.length));
-                        nodes = nodes.concat(added);
-                        chat.append(result);
-                        changed = true;
+                        const first = [...transients.values()].find(node => node.parentNode === chat);
+                        chat.insertBefore(result, first || null);
+                        nodes = nodes.concat(added); changed = true;
                     }
                 } else {
                     const count = initialized ? Math.max(PAGE, history.length - start) : PAGE;
                     start = Math.max(0, next.length - count);
-                    transients = [];
+                    if (!exact) transients.clear();
                     const { result, added } = fragment(next.slice(start));
-                    nodes = added;
-                    chat.replaceChildren(older, result);
-                    emptyNode = null;
-                    if (!next.length) {
-                        emptyNode = empty();
-                        chat.prepend(older);
-                    }
-                    changed = true;
+                    nodes = added; chat.replaceChildren(older, result);
+                    emptyNode = null; changed = true;
                 }
-                if (!next.length && !transients.length && !emptyNode) {
-                    emptyNode = empty();
-                    chat.prepend(older);
-                    changed = true;
+                nodes.forEach((node, index) => {
+                    const item = next[start + index];
+                    if (item.role === 'user' && validSendId(item.request_id)) node.dataset.requestId = item.request_id;
+                    else delete node.dataset.requestId;
+                });
+                if (exact) changed = syncOptimistic(next, optimistic) || changed;
+                if (!next.length && !transients.size && !emptyNode) {
+                    emptyNode = empty(); chat.prepend(older); changed = true;
                 }
-                history = next;
-                initialized = true;
-                older.hidden = start === 0;
+                history = next; initialized = true; older.hidden = start === 0;
                 return changed;
             },
-            append(content, role) {
+            append(content, role, requestId = null) {
                 emptyNode?.remove(); emptyNode = null;
+                const id = validSendId(requestId) ? requestId : Symbol('optimistic');
+                if (transients.has(id)) return;
                 const node = message({ role, content });
-                transients.push(node);
-                chat.append(node);
+                if (validSendId(requestId)) node.dataset.requestId = requestId;
+                transients.set(id, node); chat.append(node);
             },
             nodeAt(index) { return initialized ? nodes[index - start] || null : null; },
             start() { return start; },
         };
     }
-    globalThis.LimilinkHistory = { version: 2, create, isPrefix, linkParts, pageSize: PAGE };
+    globalThis.LimilinkHistory = { version: 3, create, isPrefix, canonicalSendIds, linkParts, pageSize: PAGE };
 })();

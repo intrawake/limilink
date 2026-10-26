@@ -3,7 +3,7 @@ async page => {
     const base = 'http://127.0.0.1:11012';
     if (!page.url().startsWith(base + '/')) throw new Error('Use the isolated fixture.');
     const check = (value, message) => { if (!value) throw new Error(message); };
-    const ready = () => page.waitForFunction(() => !document.querySelector('#send-btn').disabled);
+    const ready = () => page.waitForFunction(() => !pendingSends.has(currentSession) && !document.querySelector('#send-btn').disabled);
     const warning = page.locator('#unconfirmed-send');
     const input = page.locator('#message-input');
     const run = await page.evaluate(() => Date.now().toString(36));
@@ -69,9 +69,10 @@ async page => {
     for (const text of [missing, later]) {
         await input.fill(text);
         await page.locator('#send-btn').click();
-        await page.waitForFunction(() => document.querySelector('#send-btn').disabled);
+        await page.waitForFunction(() => pendingFor(currentSession).length === 1);
         await resume();
-        await ready();
+        // Receipt recovery can finish while both actual POST transports remain held.
+        await page.waitForFunction(() => !pendingSends.has(currentSession) && connected && !checkingSnapshot);
         check((await page.locator('#unconfirmed-text').textContent()).includes(text), 'Actually missing Send was not preserved');
     }
     check(held.length === 2, 'Resume silently posted another Send');

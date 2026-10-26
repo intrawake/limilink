@@ -645,11 +645,16 @@ def load_session_history(session_path: str) -> list[dict[Any, Any]]:
     return []
 
 
-def append_to_history(session_path: str, role: str, content: str):
+def append_to_history(
+    session_path: str, role: str, content: str, *, request_id: str | None = None
+):
     os.makedirs(session_path, exist_ok=True)
     history_file = Path(get_history_path(session_path))
     history = history_snapshot(history_file)["history"]
-    history.append({"role": role, "content": content})
+    item = {"role": role, "content": content}
+    if role == "user" and request_id is not None:
+        item["request_id"] = request_id
+    history.append(item)
     temporary = history_file.with_name(f".history.{uuid.uuid4().hex}.tmp")
     try:
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -720,7 +725,10 @@ async def get_session_snapshot(
             if busy:
                 active.add(session_id)
             result.update(
-                session_id=session_id, busy=busy, busy_sessions=sorted(active)
+                session_id=session_id,
+                busy=busy,
+                busy_sessions=sorted(active),
+                send_identities=True,
             )
             if request_id is not None:
                 result["send"] = send_snapshot(root, session_id, request_id)
@@ -808,7 +816,9 @@ async def process_chat(session_id: str, message: str) -> str:
         return await _process_chat(session_id, message, lease_fd)
 
 
-async def _process_chat(session_id: str, message: str, lease_fd: int) -> str:
+async def _process_chat(
+    session_id: str, message: str, lease_fd: int, request_id: str | None = None
+) -> str:
     try:
         # Secure the session_id to prevent directory traversal
         safe_session_id = sanitize_session_id(session_id)
@@ -819,6 +829,9 @@ async def _process_chat(session_id: str, message: str, lease_fd: int) -> str:
         # Create an isolated project directory for this session
         session_path = os.path.join(sessions_dir, safe_session_id)
         os.makedirs(session_path, exist_ok=True)
+
+        def append_user():
+            append_to_history(session_path, "user", message, request_id=request_id)
 
         # Per-session tmp directory so Pi temp files are isolated
         session_tmp = get_session_tmp_dir(session_path)
@@ -872,7 +885,7 @@ async def _process_chat(session_id: str, message: str, lease_fd: int) -> str:
 
         # Handle stop command
         if message.strip() == "!stop":
-            append_to_history(session_path, "user", message)
+            append_user()
             process = running_processes.get(safe_session_id)
             if process:
                 try:
@@ -888,7 +901,7 @@ async def _process_chat(session_id: str, message: str, lease_fd: int) -> str:
 
         # Handle agent switching command
         if message.startswith("!agent"):
-            append_to_history(session_path, "user", message)
+            append_user()
             parts = message.split(maxsplit=1)
             agent_path = os.path.join(session_path, ".agent_type")
             if len(parts) == 1:
@@ -940,7 +953,7 @@ async def _process_chat(session_id: str, message: str, lease_fd: int) -> str:
 
         # Handle model switching command
         if message.startswith("!model"):
-            append_to_history(session_path, "user", message)
+            append_user()
             parts = message.split(maxsplit=1)
             if len(parts) == 1:
                 reply = f"Current model: {current_model}"
@@ -956,7 +969,7 @@ async def _process_chat(session_id: str, message: str, lease_fd: int) -> str:
 
         # Handle reasoning effort command (pi harness only)
         if message.startswith("!reasoning_effort"):
-            append_to_history(session_path, "user", message)
+            append_user()
             parts = message.split(maxsplit=1)
 
             if len(parts) == 1:
@@ -980,7 +993,7 @@ async def _process_chat(session_id: str, message: str, lease_fd: int) -> str:
 
         # Handle env command
         if message.startswith("!env"):
-            append_to_history(session_path, "user", message)
+            append_user()
             parts = message.split(maxsplit=2)
 
             env_overrides_path = os.path.join(session_path, ".env_overrides.json")
@@ -1025,7 +1038,7 @@ async def _process_chat(session_id: str, message: str, lease_fd: int) -> str:
 
         # Handle garbage collection command
         if message.startswith("!gc"):
-            append_to_history(session_path, "user", message)
+            append_user()
             parts = message.split(maxsplit=2)
             if len(parts) < 3:
                 reply = "Usage: !gc day <N>  (delete sessions inactive for N days)"
@@ -1106,7 +1119,7 @@ async def _process_chat(session_id: str, message: str, lease_fd: int) -> str:
         # Handle trace command (pi harness only)
         stripped_message = message.strip()
         if stripped_message == "!trace" or stripped_message.startswith("!trace "):
-            append_to_history(session_path, "user", message)
+            append_user()
             parts = stripped_message.split()
             if len(parts) not in (2, 3):
                 reply = "Usage: !trace tool [COUNT]"
@@ -1175,7 +1188,7 @@ async def _process_chat(session_id: str, message: str, lease_fd: int) -> str:
 
         # Handle stat command (pi harness only)
         if message.strip() == "!stat":
-            append_to_history(session_path, "user", message)
+            append_user()
             pi_agent_dir = os.path.join(session_path, ".pi", "agent", "session")
             if not os.path.isdir(pi_agent_dir):
                 reply = "No pi-agent session data found. Send a message first!"
@@ -1231,7 +1244,7 @@ async def _process_chat(session_id: str, message: str, lease_fd: int) -> str:
         # Handle compact command (pi harness only)
         stripped_message = message.strip()
         if stripped_message == "!compact" or stripped_message.startswith("!compact "):
-            append_to_history(session_path, "user", message)
+            append_user()
             pi_session_dir = os.path.join(session_path, ".pi", "agent", "session")
             if not os.path.isdir(pi_session_dir) or not any(
                 f.endswith(".jsonl") for f in os.listdir(pi_session_dir)
@@ -1322,7 +1335,7 @@ async def _process_chat(session_id: str, message: str, lease_fd: int) -> str:
 
         # Catch-all: any message starting with ! is a command; never forward to agent
         if message.strip().startswith("!"):
-            append_to_history(session_path, "user", message)
+            append_user()
             reply = f"Unknown command: {message.strip().split()[0]}"
             append_to_history(session_path, "bot", reply)
             return reply
@@ -1400,7 +1413,7 @@ async def _process_chat(session_id: str, message: str, lease_fd: int) -> str:
         cmd = [exepath] + agent_args + ["--continue", "-p", message]
 
         # Append user message to history
-        append_to_history(session_path, "user", message)
+        append_user()
 
         if tracer:
             span = trace.get_current_span()
@@ -1577,7 +1590,10 @@ async def identified_chat(request: ChatRequest) -> JSONResponse:
             outcome: dict
             try:
                 reply = await _process_chat(
-                    request.session_id, request.message, lease_fd
+                    request.session_id,
+                    request.message,
+                    lease_fd,
+                    request.request_id,
                 )
                 outcome = {"status": 200, "body": {"reply": reply}}
             except HTTPException as exc:

@@ -113,7 +113,7 @@ async def test_live_owner_proves_only_matching_id_and_cancellation_makes_it_inde
 ):
     started = asyncio.Event()
 
-    async def blocked(session_id, message, lease_fd):
+    async def blocked(session_id, message, lease_fd, request_id=None):
         main.append_to_history(str(root / session_id), "user", message)
         started.set()
         await asyncio.Event().wait()

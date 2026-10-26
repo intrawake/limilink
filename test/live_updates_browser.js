@@ -26,7 +26,7 @@ async page => {
     // A second client's activity must appear even with no local send promise.
     const external = page.request.post(`${base}/chat`, { data: { session_id: 'session_a', message: 'External typing check' } });
     await page.waitForFunction(() => !document.querySelector('#typing').hidden && document.querySelector('#typing').textContent === 'Thinking…');
-    check(send && await send.isDisabled(), 'Server busy did not disable duplicate sends');
+    check(send && await send.isEnabled(), 'Server busy blocked an independent follow-up Send');
     check((await external).ok(), 'Fake external chat failed');
     await page.waitForFunction(() => document.querySelector('#chat-container').textContent.includes('Fixture reply: External typing check') && document.querySelector('#typing').hidden);
     await ready();
@@ -82,12 +82,12 @@ async page => {
         await send.click();
         await secondCaptured;
         await page.waitForTimeout(2200); // Ordinary snapshots observe idle before POST admission.
-        check(await send.isDisabled(), 'Idle snapshot falsely acknowledged a not-yet-admitted send');
+        check(await page.evaluate(id => pendingFor(currentSession).some(item => item.id === id), secondRoute.request().postDataJSON().request_id), 'Idle snapshot falsely acknowledged a not-yet-admitted send');
         check((await chat.textContent()).includes(secondText), 'Pre-admission snapshot erased the optimistic message');
         if (lateFailure) await firstRoute.fulfill({ status: 500, json: { detail: 'Stale request failure' } });
         else await firstRoute.fulfill({ response: firstResponse });
         await flush();
-        check(await send.isDisabled(), 'Old POST continuation cleared a newer pending send');
+        check(await page.evaluate(id => pendingFor(currentSession).some(item => item.id === id), secondRoute.request().postDataJSON().request_id), 'Old POST continuation cleared a newer pending send');
         check(!(await page.locator('#notice').textContent()).includes('Stale request failure'), 'Old POST error polluted newer UI');
         check(await page.locator('#unconfirmed-send').isHidden(), 'Old POST resurrected a dismissed recovery notice');
         const secondResponse = await secondRoute.fetch();

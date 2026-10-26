@@ -78,14 +78,38 @@ def main():
 
         with ExitStack() as overrides:
             if args.fake_chat:
+                active_replies: dict[str, asyncio.Event] = {}
 
                 async def fake_chat(
-                    session_id: str, message: str, lease_fd: int
+                    session_id: str,
+                    message: str,
+                    lease_fd: int,
+                    request_id: str | None = None,
                 ) -> str:
                     path = str(sessions / session_id)
-                    main.append_to_history(path, "user", message)
-                    await asyncio.sleep(3)
-                    reply = f"Fixture reply: {message}"
+                    main.append_to_history(path, "user", message, request_id=request_id)
+                    if message.strip() == "!stop":
+                        active = active_replies.get(session_id)
+                        if active is not None:
+                            active.set()
+                        reply = (
+                            "Agent process stopped."
+                            if active is not None
+                            else "No active agent process found for this session."
+                        )
+                    else:
+                        async with main.get_session_lock(session_id):
+                            active = asyncio.Event()
+                            active_replies[session_id] = active
+                            try:
+                                try:
+                                    await asyncio.wait_for(active.wait(), timeout=3)
+                                    reply = "Fixture reply stopped."
+                                except TimeoutError:
+                                    reply = f"Fixture reply: {message}"
+                            finally:
+                                if active_replies.get(session_id) is active:
+                                    del active_replies[session_id]
                     main.append_to_history(path, "bot", reply)
                     return reply
 

@@ -73,7 +73,7 @@ async page => {
     check(await row('session_a').locator('.session-delivery').textContent() === 'Sending…', 'Pending delivery lost its separate status');
     await oldRoute.abort('failed');
     await flush();
-    check(await page.evaluate(id => pendingSends.get('session_a')?.id === id, newerId), 'Old transport failure cleared newer Send');
+    check(await page.evaluate(id => pendingFor('session_a').some(item => item.id === id), newerId), 'Old transport failure cleared newer Send');
     await newerRoute.abort('failed');
     await page.waitForFunction(() => !pendingSends.has('session_a') && unconfirmedSends.get('session_a')?.some(item => !item.failed));
     check(await row('session_a').locator('.session-delivery').textContent() === 'Unconfirmed', 'Missing Send was silently acknowledged');
@@ -117,7 +117,7 @@ async page => {
     const third = `Offscreen owner ${run}`;
     await input.fill(third);
     await page.locator('#send-btn').click();
-    await page.waitForFunction(() => pendingSends.get('session_a')?.observedBusy);
+    await page.waitForFunction(() => pendingFor('session_a').some(item => item.accepted));
     await select('session_b');
     phase = 'malformed';
     await pollOffscreen();

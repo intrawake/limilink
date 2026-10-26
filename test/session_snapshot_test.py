@@ -158,7 +158,7 @@ def test_history_append_is_atomic_and_failure_preserves_previous_snapshot(root):
 async def test_snapshot_observes_work_from_another_client_while_post_is_pending(root):
     started, release = asyncio.Event(), asyncio.Event()
 
-    async def blocked_chat(session_id, message, lease_fd):
+    async def blocked_chat(session_id, message, lease_fd, request_id=None):
         main.append_to_history(str(root / session_id), "user", message)
         started.set()
         await release.wait()

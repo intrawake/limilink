@@ -10,7 +10,7 @@ async page => {
         await page.route('**/follow.js', route => route.fulfill({ body: script, contentType: 'text/javascript' }));
         await page.route('**/arrange.css', route => route.fulfill({ body: css, contentType: 'text/css' }));
         const html = (await (await page.request.get(page.url())).text())
-            .replace('    <script src="/history-view.js?v=2" defer></script>\n', '<script>globalThis.LimilinkHistory={version:1,create(){throw Error("Stale helper used");}}</script>\n')
+            .replace('    <script src="/history-view.js?v=3" defer></script>\n', '<script>globalThis.LimilinkHistory={version:2,create(){throw Error("Stale helper used");}}</script>\n')
             .replace('    <script src="/reply-state.js?v=1" defer></script>\n', '')
             .replace('</body>', '<button id="rename-current" hidden>Rename</button></body>');
         await page.route('**/?controller=steady', route => route.fulfill({ body: html, contentType: 'text/html' }));
@@ -44,7 +44,7 @@ async page => {
         await page.reload();
         await page.waitForFunction(() => historyReady && currentSession === 'session_c' && !sendButton.disabled);
         await page.evaluate(() => { globalThis.__linkXss = 0; });
-        check(await page.evaluate(() => globalThis.LimilinkHistory.version) === 2, 'Cached helper was not upgraded');
+        check(await page.evaluate(() => globalThis.LimilinkHistory.version) === 3, 'Cached helper was not upgraded');
         const chat = page.locator('#chat-container');
         const labelled = chat.getByRole('link', { name: 'Labelled', exact: true });
         check(await chat.locator('a').count() === 6, 'Wrong initial link count');

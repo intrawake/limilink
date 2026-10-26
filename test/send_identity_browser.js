@@ -94,7 +94,8 @@ async page => {
     check(await phone.evaluate(() => isSecureContext) === false, 'Fixture origin accidentally has secure-context privileges');
     await phone.locator('#message-input').fill(`Plain HTTP Send ${run}`);
     await phone.locator('#send-btn').click();
-    await phone.waitForFunction(() => !document.querySelector('#send-btn').disabled);
+    // Send readiness now allows follow-ups; wait for this delivery explicitly.
+    await phone.waitForFunction(() => !pendingSends.has(currentSession) && !document.querySelector('#send-btn').disabled);
     check(/^[0-9a-f]{32}$/.test(insecureId), 'Plain HTTP could not generate an ID');
     check(insecurePosts === 1, 'Plain HTTP Send was duplicated');
     await phone.evaluate(() => Object.defineProperty(crypto, 'getRandomValues', { configurable: true, value: () => { throw new Error('fixture random source unavailable'); } }));
@@ -103,6 +104,8 @@ async page => {
     check(await phone.locator('#message-input').inputValue() === 'Keep this draft when ID generation fails', 'ID generation failure lost the draft');
     check(insecurePosts === 1, 'ID generation failure silently sent without an ID');
     check((await phone.locator('#notice').textContent()).includes('could not safely identify'), 'ID generation failure was hidden');
+    await phone.evaluate(() => pauseUpdates());
+    await context.unrouteAll({ behavior: 'wait' });
     await context.close();
     console.log('PASS: one Send + resume produces one browser POST; concurrent/completed packet replay creates one saved user/reply; identical intentional Send gets a new ID; insecure HTTP and random-source failure are safe. No providers.');
 }

@@ -12,6 +12,8 @@ const renameDialog = byId('rename-dialog');
 const mobile = window.matchMedia('(max-width: 720px)');
 const drafts = new Map();
 const pendingSends = new Map();
+const displaySends = new Map();
+const activePosts = new Map();
 const historyCache = new Map();
 const unconfirmedSends = new Map();
 const savedReceiptCursor = new Map();
@@ -31,6 +33,7 @@ let replies = null;
 let historyView = null;
 let displayedReply = null;
 let replyTrackingAvailable = false;
+let sendIdentityAvailable = false;
 let backgroundReceiptCursor = 0;
 let pollTimer = null;
 let connected = false;
@@ -48,6 +51,43 @@ let trashTimer = null;
 let nextTrashRefresh = 0;
 
 function isTrashed(id) { return sessions.some(session => session.id === id && session.delete_at !== undefined); }
+
+const MAX_SESSION_SENDS = 16, MAX_TOTAL_SENDS = 128;
+function pendingFor(id) { return [...(pendingSends.get(id)?.values() || [])]; }
+function isPending(id, request) { return pendingSends.get(id)?.get(request.id) === request; }
+function addPending(id, request) {
+    let group = pendingSends.get(id);
+    if (!group) pendingSends.set(id, group = new Map());
+    group.set(request.id, request);
+}
+function removePending(id, request) {
+    const group = pendingSends.get(id);
+    if (group?.get(request.id) !== request) return;
+    group.delete(request.id);
+    if (!group.size) pendingSends.delete(id);
+}
+function trackedFor(id) {
+    const records = new Map([...(displaySends.get(id)?.values() || [])].map(item => [item.id, item]));
+    for (const item of pendingFor(id)) records.set(item.id, item);
+    for (const item of unconfirmedSends.get(id) || []) records.set(item.id, item);
+    for (const post of activePosts.values()) if (post.sessionId === id) records.set(post.request.id, post.request);
+    return [...records.values()];
+}
+function isTracked(id, request) {
+    return isPending(id, request) || (unconfirmedSends.get(id) || []).includes(request);
+}
+function hasReceipts(id) {
+    return pendingSends.has(id) || (unconfirmedSends.get(id) || []).some(item => !item.failed);
+}
+function hasSendCapacity(id, text) {
+    // One extra control slot keeps !stop available when ordinary slots are full.
+    const extra = text.trim() === '!stop' ? 1 : 0;
+    let total = 0;
+    const keys = new Set([...pendingSends.keys(), ...unconfirmedSends.keys(), ...displaySends.keys(), ...[...activePosts.values()].map(item => item.sessionId)]);
+    for (const key of keys) total += trackedFor(key).length;
+    return trackedFor(id).length < MAX_SESSION_SENDS + extra && total < MAX_TOTAL_SENDS + extra;
+}
+
 
 async function api(path, options = {}) {
     const response = await fetch(path, { cache: 'no-store', ...options });
@@ -85,6 +125,22 @@ function sessionTitle(id) {
     return sessions.find(session => session.id === id)?.title || id || 'Limilink';
 }
 
+function addDisplay(id, request) {
+    let group = displaySends.get(id);
+    if (!group) displaySends.set(id, group = new Map());
+    group.set(request.id, request);
+}
+function removeDisplay(id, request) {
+    const group = displaySends.get(id);
+    if (group?.get(request.id) !== request) return;
+    group.delete(request.id);
+    if (!group.size) displaySends.delete(id);
+}
+function hasTransportCapacity(text) {
+    const stop = text.trim() === '!stop';
+    return [...activePosts.values()].filter(item => (item.request.text.trim() === '!stop') === stop).length < (stop ? 1 : 2);
+}
+
 function updateHeading() {
     byId('session-title').textContent = sessionTitle(currentSession);
     byId('session-title').classList.toggle('trashed', isTrashed(currentSession));
@@ -95,11 +151,15 @@ function updateHeading() {
 
 function updateInputState() {
     input.disabled = !currentSession || isTrashed(currentSession);
-    const pending = pendingSends.get(currentSession);
+    const pending = pendingFor(currentSession);
     const busy = serverBusy.has(currentSession);
-    sendButton.disabled = input.disabled || !historyReady || !connected || checkingSnapshot || busy || !!pending;
-    byId('typing').hidden = !connected || (!busy && !pending);
-    byId('typing').textContent = busy ? 'Thinking…' : pending?.observedBusy ? 'Waiting for confirmation…' : 'Sending…';
+    const text = input.value || '';
+    const capacity = hasSendCapacity(currentSession, text) && hasTransportCapacity(text);
+    const legacyBlocked = !sendIdentityAvailable && (busy || pending.length > 0);
+    sendButton.disabled = input.disabled || !historyReady || !connected || (checkingSnapshot && text.trim() !== '!stop') || legacyBlocked || !capacity;
+    sendButton.title = capacity ? '' : 'Pending limit reached. Wait or dismiss saved messages; !stop has separate capacity.';
+    byId('typing').hidden = !connected || (!busy && !pending.length);
+    byId('typing').textContent = busy ? 'Thinking…' : pending.some(item => item.accepted) ? 'Waiting for reply…' : 'Sending…';
 }
 
 function setSidebarBusy(value) {
@@ -150,10 +210,11 @@ function actionButton(text, action, session, disabled = false) {
 }
 
 function deliveryStatus(id) {
-    const pending = pendingSends.get(id);
+    const pending = pendingFor(id);
     const saved = unconfirmedSends.get(id) || [];
     if (saved.some(item => !item.failed)) return 'Unconfirmed';
-    if (pending && !serverBusy.has(id)) return pending.observedBusy || pending.needsRecovery ? 'Confirming…' : 'Sending…';
+    if (pending.length > 1) return `Pending ${pending.length}`;
+    if (pending.length && !serverBusy.has(id)) return pending[0].accepted ? 'Pending' : pending[0].needsRecovery ? 'Confirming…' : 'Sending…';
     return saved.length ? 'Send failed' : '';
 }
 
@@ -452,6 +513,7 @@ function focusSession(id) {
 
 function applySessions(data) {
     sessions = data.sessions;
+    recoverMissingSessions();
     if (typeof data.server_time === 'number') serverClockOffset = data.server_time * 1000 - Date.now();
     const hasTrash = sessions.some(session => session.delete_at !== undefined);
     if (hasTrash && trashTimer === null) trashTimer = setInterval(tickTrash, 1000);
@@ -594,8 +656,8 @@ function emptyConversation(heading, detail = '') {
     return empty;
 }
 
-function appendMessage(content, sender, scroll = true) {
-    historyView.append(content, sender);
+function appendMessage(content, sender, scroll = true, requestId = null) {
+    historyView.append(content, sender, requestId);
     if (scroll) chat.scrollTop = chat.scrollHeight;
 }
 
@@ -604,37 +666,94 @@ function connectionStatus(message = '') {
     byId('connection-status').hidden = !message;
 }
 
+function recoverableForView() {
+    const records = [];
+    for (const [id, saved] of unconfirmedSends) {
+        if (id === currentSession || !sessions.some(item => item.id === id)) {
+            for (const request of saved) records.push({ sessionId: id, request });
+        }
+    }
+    return records;
+}
+
+function recoverMissingSessions() {
+    const known = new Set(sessions.map(item => item.id));
+    const keys = new Set([...pendingSends.keys(), ...displaySends.keys(), ...[...activePosts.values()].map(item => item.sessionId)]);
+    for (const id of keys) {
+        if (known.has(id)) continue;
+        for (const request of trackedFor(id)) {
+            removePending(id, request);
+            removeDisplay(id, request);
+            if (request.dismissed) request.transport?.abort();
+            else if (!request.settled) preserveUnconfirmed(id, request);
+        }
+    }
+    showUnconfirmed();
+}
+
+function dismissRecoverable(records) {
+    for (const { sessionId: id, request } of records) {
+        if (!(unconfirmedSends.get(id) || []).includes(request)) continue;
+        request.dismissed = true;
+        removeDisplay(id, request);
+        forgetSavedSend(id, request);
+        // Explicit human recovery/dismissal may release an inaccessible old
+        // transport. It neither replays a POST nor signals a backend process.
+        if (!sessions.some(item => item.id === id)) request.transport?.abort();
+    }
+}
+
 function showUnconfirmed() {
-    const saved = unconfirmedSends.get(currentSession) || [];
-    byId('unconfirmed-send').hidden = !saved.length;
-    byId('saved-send-status').textContent = saved.some(item => !item.failed)
-        ? 'Delivery couldn’t be confirmed. Check the conversation before resending.'
-        : 'The send failed. Your message is saved below.';
-    byId('unconfirmed-text').textContent = saved.map(item => item.text).join('\n\n---\n\n');
+    const records = recoverableForView();
+    const removed = records.some(item => item.sessionId !== currentSession);
+    byId('unconfirmed-send').hidden = !records.length;
+    byId('saved-send-status').textContent = removed
+        ? 'Messages from removed conversations are saved below. Restoring copies them into this conversation’s draft.'
+        : records.some(item => !item.request.failed)
+            ? 'Delivery couldn’t be confirmed. Check the conversation before resending.'
+            : 'The send failed. Your message is saved below.';
+    byId('unconfirmed-text').textContent = records.map(({ sessionId, request }) =>
+        sessionId === currentSession ? request.text : `Removed conversation ${sessionId}:\n${request.text}`).join('\n\n---\n\n');
+    byId('restore-unconfirmed').disabled = !currentSession || isTrashed(currentSession);
+    byId('restore-unconfirmed').textContent = removed ? 'Restore here as draft' : 'Restore as draft';
 }
 
 function preserveUnconfirmed(id, request) {
     const saved = unconfirmedSends.get(id) || [];
     if (!saved.includes(request)) saved.push(request);
     unconfirmedSends.set(id, saved);
-    if (id === currentSession) showUnconfirmed();
+    showUnconfirmed();
 }
 
 function forgetSavedSend(id, request) {
     const saved = (unconfirmedSends.get(id) || []).filter(item => item !== request);
     if (saved.length) unconfirmedSends.set(id, saved);
     else unconfirmedSends.delete(id);
-    if (id === currentSession) showUnconfirmed();
+    showUnconfirmed();
 }
 
 function receiptCandidate(id) {
-    const pending = pendingSends.get(id);
-    const saved = (unconfirmedSends.get(id) || []).filter(item => !item.failed);
-    return { pending, saved, tracked: pending || saved[(savedReceiptCursor.get(id) || 0) % saved.length] };
+    const records = [...pendingFor(id), ...(unconfirmedSends.get(id) || []).filter(item => !item.failed)];
+    const unique = [...new Map(records.map(item => [item.id, item])).values()];
+    const cursor = savedReceiptCursor.get(id) || 0;
+    savedReceiptCursor.set(id, (cursor + 1) % Math.max(1, unique.length));
+    return { tracked: unique[cursor % unique.length] };
 }
 
-function reconcileReceipt(id, { pending, saved, tracked }, data, recover = false) {
-    if (!tracked || !(pendingSends.get(id) === tracked || (unconfirmedSends.get(id) || []).includes(tracked))) return false;
+function settleSend(id, request, outcome) {
+    if (!isTracked(id, request) || request.settled) return false;
+    request.settled = true;
+    removePending(id, request);
+    if (outcome.status === 200) forgetSavedSend(id, request);
+    else { removeDisplay(id, request); saveFailedSend(id, request, outcome.body.detail); }
+    reconcileViews.add(id);
+    // Exact terminal evidence releases a held transport; never retry its POST.
+    request.transport?.abort();
+    return true;
+}
+
+function reconcileReceipt(id, { tracked }, data, recover = false) {
+    if (!tracked || !isTracked(id, tracked) || tracked.settled) return false;
     const receipt = data.send?.id === tracked.id ? data.send : null;
     if (receipt?.state === 'complete' && (!Number.isInteger(receipt.outcome?.status)
         || !receipt.outcome?.body || (receipt.outcome.status === 200
@@ -642,31 +761,21 @@ function reconcileReceipt(id, { pending, saved, tracked }, data, recover = false
             : receipt.outcome.status < 400 || receipt.outcome.status > 599 || !('detail' in receipt.outcome.body)))) {
         throw new Error('The server returned an incomplete Send receipt.');
     }
-    if (pendingSends.get(id) === pending && data.busy && pending) pending.observedBusy = true;
-    let reconciled = false;
-    if (receipt?.state === 'complete') {
-        if (pendingSends.get(id) === tracked) pendingSends.delete(id);
-        if (receipt.outcome.status === 200) forgetSavedSend(id, tracked);
-        else if (!tracked.failed) saveFailedSend(id, tracked, receipt.outcome.body.detail);
-        reconciled = true;
-    } else if (receipt?.state === 'running') {
-        // A live owner has this exact Send, even if its HTTP reply was lost.
-        reconciled = !tracked.needsRecovery || !pendingSends.has(id) || (unconfirmedSends.get(id) || []).includes(tracked);
+    if (receipt?.state === 'complete') return settleSend(id, tracked, receipt.outcome);
+    if (receipt?.state === 'running') {
+        const changed = !tracked.accepted || !isPending(id, tracked);
+        tracked.accepted = true;
         tracked.needsRecovery = true;
         forgetSavedSend(id, tracked);
-        if (!pendingSends.has(id)) pendingSends.set(id, tracked);
-    } else if (pending && pendingSends.get(id) === pending
-        && (recover || pending.needsRecovery || receipt?.state === 'indeterminate')) {
-        // Idle is not an acknowledgement. Keep genuinely uncertain text.
-        pendingSends.delete(id);
-        preserveUnconfirmed(id, pending);
-        reconciled = true;
+        addPending(id, tracked);
+        return changed;
     }
-    if (!pending && saved.length) {
-        // A permanently missing receipt must not starve later saved sends.
-        savedReceiptCursor.set(id, ((savedReceiptCursor.get(id) || 0) + 1) % saved.length);
+    if (isPending(id, tracked) && (recover || tracked.needsRecovery || receipt?.state === 'indeterminate')) {
+        removePending(id, tracked);
+        preserveUnconfirmed(id, tracked);
+        return true;
     }
-    return reconciled;
+    return false;
 }
 
 function saveFailedSend(id, request, detail) {
@@ -675,9 +784,15 @@ function saveFailedSend(id, request, detail) {
     notice(`Message in “${sessionTitle(id)}” failed: ${typeof detail === 'string' ? detail : 'The request failed.'}`);
 }
 
-function renderHistory(history, followBottom = isScrolledToBottom) {
+function renderHistory(history, followBottom = isScrolledToBottom, finishedBefore = new Set()) {
     const scrollTop = chat.scrollTop;
-    historyView.render(history, pendingSends.has(currentSession));
+    const recorded = globalThis.LimilinkHistory.canonicalSendIds(history);
+    for (const item of [...(displaySends.get(currentSession)?.values() || [])]) {
+        // A fresh snapshot after completion is authoritative even after a history rewrite.
+        if (recorded.has(item.id) || (item.settled && finishedBefore.has(item.id))) removeDisplay(currentSession, item);
+    }
+    const optimistic = [...(displaySends.get(currentSession)?.values() || [])].filter(item => !item.failed);
+    historyView.render(history, sendIdentityAvailable ? optimistic : pendingSends.has(currentSession));
     if (followBottom) chat.scrollTop = chat.scrollHeight;
     else {
         chat.scrollTop = scrollTop;
@@ -704,8 +819,9 @@ async function syncSnapshot({ initial = false, recover = false, force = false, r
     const generation = sendGeneration;
     const sequence = snapshotSequence;
     const candidate = receiptCandidate(id);
-    const { pending, tracked } = candidate;
-    if (recover && pending) pending.needsRecovery = true;
+    const finishedBefore = new Set([...(displaySends.get(id)?.values() || [])].filter(item => item.settled).map(item => item.id));
+    const { tracked } = candidate;
+    if (recover) for (const request of pendingFor(id)) request.needsRecovery = true;
     const cached = historyCache.get(id);
     const controller = new AbortController();
     const request = { id, recover, controller, timeout: null, promise: null };
@@ -733,6 +849,7 @@ async function syncSnapshot({ initial = false, recover = false, force = false, r
                 throw new Error('The server returned an incomplete conversation state.');
             }
             const changed = !cached || cached.revision !== data.revision;
+            sendIdentityAvailable = data.send_identities === true;
             const reply = canonicalReply(data.reply, history);
             replyTrackingAvailable = !!reply;
             const unreadChanged = replies?.observe(id, reply) || false;
@@ -742,7 +859,7 @@ async function syncSnapshot({ initial = false, recover = false, force = false, r
             const busyChanged = nextBusy.size !== serverBusy.size || [...nextBusy].some(key => !serverBusy.has(key));
             serverBusy = nextBusy;
             const reconciled = reconcileReceipt(id, candidate, data, recover);
-            if (changed || initial || reconciled || refreshView || reconcileViews.has(id)) renderHistory(history, initial || isScrolledToBottom);
+            if (changed || initial || reconciled || refreshView || reconcileViews.has(id) || finishedBefore.size) renderHistory(history, initial || isScrolledToBottom, finishedBefore);
             reconcileViews.delete(id);
             historyReady = true;
             connected = true;
@@ -893,7 +1010,7 @@ async function syncBackgroundReceipt() {
     if (activeReceiptCheck) return activeReceiptCheck.promise;
     // One extra GET per poll, round-robin over unresolved local Sends only.
     // No all-history polling, new timer or automatic POST retry.
-    const ids = sessions.map(session => session.id).filter(id => id !== currentSession && receiptCandidate(id).tracked);
+    const ids = sessions.map(session => session.id).filter(id => id !== currentSession && hasReceipts(id));
     if (!ids.length) return false;
     const id = ids[backgroundReceiptCursor++ % ids.length];
     const candidate = receiptCandidate(id);
@@ -909,7 +1026,7 @@ async function syncBackgroundReceipt() {
             if (activeReceiptCheck !== request || controller.signal.aborted || id === currentSession
                 || document.visibilityState !== 'visible') return false;
             if (typeof data.revision !== 'string' || typeof data.busy !== 'boolean') throw new Error('Incomplete conversation state.');
-            const relevant = pendingSends.get(id) === candidate.tracked || (unconfirmedSends.get(id) || []).includes(candidate.tracked);
+            const relevant = isTracked(id, candidate.tracked);
             if (!relevant) return false;
             const wasBusy = serverBusy.has(id);
             const delivery = deliveryStatus(id);
@@ -950,7 +1067,7 @@ function pauseUpdates() {
     invalidateReceiptCheck();
     invalidateReplyCheck();
     cancelReplyRead();
-    for (const request of pendingSends.values()) request.needsRecovery = true;
+    for (const group of pendingSends.values()) for (const request of group.values()) request.needsRecovery = true;
 }
 
 function resumeUpdates() {
@@ -1009,56 +1126,46 @@ function newSendId() {
 
 async function sendMessage() {
     const text = input.value.trim();
-    if (!text || sendButton.disabled) return;
+    if (!text || sendButton.disabled || !hasSendCapacity(currentSession, text) || !hasTransportCapacity(text)) return;
     const id = currentSession;
     let requestId;
-    try { requestId = newSendId(); }
+    try {
+        requestId = newSendId();
+        if (trackedFor(id).some(item => item.id === requestId)) throw new Error('Duplicate Send identity');
+    }
     catch { notice('This browser could not safely identify the send. Your draft has been kept.'); return; }
-    const request = { token: Symbol('send'), id: requestId, text, needsRecovery: false, observedBusy: false };
+    const request = { id: requestId, text, needsRecovery: false, accepted: false, settled: false, transport: new AbortController() };
     ++sendGeneration;
     invalidateSnapshot();
-    pendingSends.set(id, request);
+    if (text === '!stop') { invalidateReceiptCheck(); invalidateReplyCheck(); }
+    addPending(id, request);
+    addDisplay(id, request);
+    activePosts.set(request, { sessionId: id, request });
     input.value = '';
     drafts.delete(id);
     resizeInput();
-    appendMessage(text, 'user');
+    appendMessage(text, 'user', true, request.id);
     renderSessions();
     updateInputState();
-    // Human action only: reconciliation, background replies and retries do not
-    // emit this display boundary. No message content is sent to the observer.
     document.dispatchEvent(new CustomEvent('limilink:human-send', { detail: { sessionId: id, requestId: request.id } }));
-    let failure = null;
     try {
-        const response = api('/chat', jsonRequest('POST', { session_id: id, message: text, request_id: request.id }));
-        syncSnapshot({ force: true });
-        await response;
-    } catch (error) { failure = error; }
-    // A resumed page may have reconciled this request and sent another message.
-    // Neither a delayed response nor its error may clear that newer request.
-    if (pendingSends.get(id) !== request) {
-        if (!failure && !request.failed) forgetSavedSend(id, request);
-        else if (failure?.status && !failure.unconfirmed) {
-            const saved = unconfirmedSends.get(id) || [];
-            if (saved.includes(request)) {
-                request.failed = true;
-                if (id === currentSession) showUnconfirmed();
-            }
+        const response = api('/chat', { ...jsonRequest('POST', { session_id: id, message: text, request_id: request.id }), signal: request.transport.signal });
+        if (text !== '!stop') syncSnapshot({ force: true });
+        const body = await response;
+        if (typeof body.reply !== 'string') throw new Error('The server returned an incomplete Send response.');
+        settleSend(id, request, { status: 200, body });
+    } catch (error) {
+        if (isTracked(id, request) && !request.settled) {
+            if (error.status && !error.unconfirmed) settleSend(id, request, { status: error.status, body: { detail: error.message } });
+            else request.needsRecovery = true;
         }
+    } finally {
+        if (activePosts.get(request)?.request === request) activePosts.delete(request);
+        request.transport = null;
         renderSessions();
-        return;
+        updateInputState();
+        if (currentSession === id) await syncSnapshot({ force: true, refreshView: true });
     }
-    reconcileViews.add(id);
-    if (failure && (!failure.status || failure.unconfirmed)) {
-        // Check the receipt before warning: a broken transport is not a lost Send.
-        request.needsRecovery = true;
-    } else {
-        pendingSends.delete(id);
-        forgetSavedSend(id, request);
-        if (failure) saveFailedSend(id, request, failure.message);
-    }
-    renderSessions();
-    updateInputState();
-    if (currentSession === id) await syncSnapshot({ force: true, refreshView: true });
 }
 
 function resizeInput() {
@@ -1084,21 +1191,27 @@ window.addEventListener('pageshow', resumeUpdates);
 window.addEventListener('focus', resumeUpdates);
 window.addEventListener('online', () => { invalidateSnapshot(); resumeUpdates(); });
 byId('restore-unconfirmed').addEventListener('click', () => {
-    const saved = (unconfirmedSends.get(currentSession) || []).map(item => item.text).join('\n\n');
+    if (!currentSession || isTrashed(currentSession)) return;
+    const records = recoverableForView();
+    const saved = records.map(item => item.request.text).join('\n\n');
     if (!saved) return;
     input.value = input.value ? `${input.value}\n\n${saved}` : saved;
     drafts.set(currentSession, input.value);
-    unconfirmedSends.delete(currentSession);
+    dismissRecoverable(records);
     showUnconfirmed();
-    resizeInput();
-    input.focus();
+    const cached = historyCache.get(currentSession);
+    if (cached) renderHistory(cached.history);
+    renderSessions(); updateInputState(); resizeInput(); input.focus();
 });
 byId('dismiss-unconfirmed').addEventListener('click', () => {
-    unconfirmedSends.delete(currentSession);
+    dismissRecoverable(recoverableForView());
     showUnconfirmed();
+    const cached = historyCache.get(currentSession);
+    if (cached) renderHistory(cached.history);
+    renderSessions(); updateInputState();
 });
 sendButton.addEventListener('click', sendMessage);
-input.addEventListener('input', () => { drafts.set(currentSession, input.value); resizeInput(); });
+input.addEventListener('input', () => { drafts.set(currentSession, input.value); resizeInput(); updateInputState(); });
 input.addEventListener('keydown', event => {
     if (event.key === 'Enter' && !event.shiftKey && !window.matchMedia('(pointer: coarse)').matches && !event.isComposing) {
         event.preventDefault();
@@ -1135,7 +1248,7 @@ async function initialize() {
     setSidebarBusy(true);
     try {
         await Promise.all([
-            globalThis.LimilinkHistory?.version === 2 ? null : import('/history-view.js?v=2'),
+            globalThis.LimilinkHistory?.version === 3 ? null : import('/history-view.js?v=3'),
             globalThis.LimilinkReplies ? null : import('/reply-state.js?v=1'),
         ]);
         replies = globalThis.LimilinkReplies.create();

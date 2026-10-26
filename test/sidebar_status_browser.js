@@ -30,7 +30,7 @@ async page => {
             pauseUpdates();
             serverBusy.clear(); pendingSends.clear(); unconfirmedSends.clear();
             sessions.find(item => item.id === 'session_a').title = 'A very long conversation title that still leaves every status and the options menu usable';
-            pendingSends.set('session_a', { id: 'f'.repeat(32), text: 'Not admitted' });
+            addPending('session_a', { id: 'f'.repeat(32), text: 'Not admitted' });
             renderSessions();
         });
         const row = page.locator('.session-row[data-session-id="session_a"]');
