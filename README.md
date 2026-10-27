@@ -18,10 +18,9 @@ pdm install -G discord
 pdm run limilink-discord
 ```
 
-## Tests
+Run the checks:
 
 ```sh
 pdm run test
-node --test test/*_test.mjs
 pdm run lint
 ```

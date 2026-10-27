@@ -54,7 +54,9 @@ limilink = { shell = "PYTHONPATH=src python src/server.py" }
 preset_server = { shell = "PYTHONPATH=src python src/server.py --config preset/config.sxpb" }
 limilink-discord = { shell = "PYTHONPATH=src python demo/discord_bot.py" }
 preset_discord_bot = { shell = "LIMILINK_CONFIG=preset/config.sxpb PYTHONPATH=src python demo/discord_bot.py" }
-test = "pytest"
+test-python = "pytest"
+test-js = { shell = "node --test test/*_test.mjs" }
+test = { composite = ["test-python", "test-js"] }
 build = "python tool/build_svg.py"
 check-format = "ruff check"
 check-type = "ty check"
