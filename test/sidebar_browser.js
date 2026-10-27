@@ -82,7 +82,7 @@ async page => {
     });
     await row('session_a').locator('.session-link').click();
     await first;
-    check(await page.locator('#send-btn').isDisabled(), 'Send enabled before history resolved');
+    check(await page.locator('#send-btn').isEnabled(), 'History read disabled the Send action');
     await select('session_b');
     await row('session_a').locator('.session-link').click();
     await second;
@@ -100,7 +100,7 @@ async page => {
     await page.locator('#message-input').fill('Hello Alpha');
     await page.locator('#message-input').press('Enter');
     await chatSeen;
-    check(await page.locator('#send-btn').isDisabled(), 'Pending send was not disabled');
+    check(await page.locator('#send-btn').isEnabled(), 'Pending reply disabled another Send');
     await row('session_a').locator('summary').click();
     check(await row('session_a').locator('.trash-button').isEnabled(), 'Active work should be trashable without being killed');
     const replyHistory = [
@@ -113,7 +113,7 @@ async page => {
     const reconciled = page.waitForResponse(response => response.url().includes('/sessions/session_a/snapshot'));
     await chatRoute.fulfill({ json: { reply: 'Exactly one reply' } });
     await reconciled;
-    await page.waitForFunction(() => !document.querySelector('#send-btn').disabled);
+    await page.waitForFunction(() => !pendingSends.has(currentSession) && activeSnapshot === null);
     check(await page.locator('.message.bot').count() === 1, 'Reply duplicated after history reconciliation');
     check(await page.locator('.message.user').count() === 1, 'User message duplicated after history reconciliation');
     await page.unroute('**/chat');
@@ -141,7 +141,12 @@ async page => {
     check((await ids()).at(-1) === 'session_a', 'Trash did not move the session last');
     check(await row('session_a').evaluate(element => element.classList.contains('trashed')), 'Trash title is not greyed');
     check(await row('session_a').locator('.session-name').evaluate(element => getComputedStyle(element).color) === 'rgb(144, 148, 156)', 'Trashed title color is not grey');
-    check(await page.locator('#send-btn').isDisabled(), 'Can send new work to a trashed session');
+    check(await page.locator('#send-btn').isEnabled(), 'Cached trash status disabled Send');
+    const rejectedTrash = 'Retain server-rejected trash message';
+    await page.locator('#message-input').fill(rejectedTrash);
+    await page.locator('#send-btn').click();
+    await page.waitForFunction(text => unconfirmedSends.get(currentSession)?.some(item => item.text === text && item.failed), rejectedTrash);
+    check((await page.locator('#unconfirmed-text').textContent()).includes(rejectedTrash), 'Server trash rejection lost text');
     const deadline = await row('session_a').locator('.trash-countdown').getAttribute('data-delete-at');
     await page.reload();
     await settled();

@@ -14,8 +14,8 @@ async function controller(name) {
     });
     vm.runInContext(source.slice(0, end), context);
     vm.runInContext(`
-        let warnings = 0;
-        renderSessions = () => {}; showUnconfirmed = () => {}; notice = () => { warnings++; };
+        let warnings = 0, lastNotice = '';
+        renderSessions = () => {}; showUnconfirmed = () => {}; notice = message => { warnings++; lastNotice = message; };
         sessions = [{id:'a'}, {id:'b'}, {id:'c'}]; currentSession = 'c';
         connected = true; historyReady = true; sendIdentityAvailable = true;
         function submission(id, text='same') { return {id, text, accepted:false, needsRecovery:false, settled:false}; }
@@ -24,18 +24,70 @@ async function controller(name) {
 }
 
 for (const name of ['follow', 'steady']) {
-    test(`${name}: old backends stay single-flight and ordinary saturation still admits Stop`, async () => {
+    test(`${name}: stale reads, busy work and local bounds never disable Send`, async () => {
         const run = await controller(name);
         run(`
-            currentSession='a';serverBusy.add('a');sendIdentityAvailable=false;updateInputState();
-            if(!sendButton.disabled)throw Error('Concurrent UI activated without identity capability');
-            sendIdentityAvailable=true;updateInputState();
-            if(sendButton.disabled)throw Error('Server busy still blocked independent sends');
+            currentSession='a';serverBusy.add('a');sendIdentityAvailable=false;
+            connected=false;historyReady=false;checkingSnapshot=true;
+            sessions[0].delete_at=Date.now()/1000+60;updateInputState();
+            if(sendButton.disabled || input.disabled)throw Error('Stale observations disabled Send/composer');
             const a=submission('a0'),b=submission('b0');
-            activePosts.set(a.id,{sessionId:'a',request:a});activePosts.set(b.id,{sessionId:'b',request:b});
-            input.value='followup';updateInputState();if(!sendButton.disabled)throw Error('Transport bound lost');
-            input.value=' !stop ';checkingSnapshot=true;updateInputState();if(sendButton.disabled)throw Error('Healthy revalidation or ordinary transports blocked Stop');
-            connected=false;updateInputState();if(!sendButton.disabled)throw Error('Stop bypassed connectivity guard');
+            activePosts.set(a,{sessionId:'a',request:a});activePosts.set(b,{sessionId:'b',request:b});
+            input.value='followup';updateInputState();if(sendButton.disabled)throw Error('Transport bound disabled action');
+            input.value=' !stop ';updateInputState();if(sendButton.disabled)throw Error('Revalidation blocked Stop');
+            currentSession=null;updateInputState();if(sendButton.disabled || !input.disabled)throw Error('No-target action/state incorrect');
+        `);
+    });
+
+    test(`${name}: true local limits explain refusal without clearing draft or creating a Send`, async () => {
+        const run=await controller(name);
+        await run(`(async () => {
+            let posts=0,nonces=0;api=async()=>{posts++;};newSendId=()=>{nonces++;return 'a'.repeat(32);};
+            input.value='Retain this draft';currentSession=null;await sendMessage();
+            if(!lastNotice.includes('Choose a conversation'))throw Error('No-target refusal silent');
+            currentSession='a';
+            const a=submission('a0'),b=submission('b0');
+            activePosts.set(a,{sessionId:'a',request:a});activePosts.set(b,{sessionId:'b',request:b});
+            updateInputState();await sendMessage();
+            if(!lastNotice.includes('two requests') || input.value!=='Retain this draft')throw Error('Backpressure lost draft/explanation');
+            activePosts.clear();unconfirmedSends.set('a',Array.from({length:16},(_,i)=>submission('saved'+i)));
+            await sendMessage();if(!lastNotice.includes('local message limit') || input.value!=='Retain this draft')throw Error('Retention bound silent/lost draft');
+            if(posts || nonces || sendGeneration || pendingSends.size || displaySends.size)throw Error('Rejected intent allocated/emitted/dispatched');
+        })()`);
+    });
+
+    test(`${name}: POST attempts ignore failed refreshes and immediately expose uncertain text`, async () => {
+        const run=await controller(name);
+        await run(`(async () => {
+            let posts=0,events=0;globalThis.CustomEvent=class {};document.dispatchEvent=()=>events++;
+            appendMessage=()=>{};resizeInput=()=>{};syncSnapshot=async()=>false;
+            newSendId=()=> 'a'.repeat(32);api=async()=>{posts++;throw Error('Fixture transport failure');};
+            currentSession='a';connected=false;historyReady=false;checkingSnapshot=true;sendIdentityAvailable=false;
+            sessions[0].delete_at=Date.now()/1000+60;serverBusy.add('a');
+            input.value='Try despite stale state';updateInputState();await sendMessage();
+            const saved=unconfirmedSends.get('a');
+            if(posts!==1 || events!==1 || saved?.length!==1 || saved[0].text!=='Try despite stale state' || !saved[0].needsRecovery || saved[0].failed)throw Error('Uncertain attempt not immediately recoverable');
+            if(activePosts.size || sendButton.disabled || isPending('a',saved[0]))throw Error('Failure kept transport/pending ownership or disabled future action');
+            const discarded=saved[0];dismissRecoverable([{sessionId:'a',request:discarded}]);
+            for(const send of [{id:discarded.id,state:'missing'},{id:discarded.id,state:'running'},{id:discarded.id,state:'complete',outcome:{status:429,body:{detail:'late'}}}]) {
+                if(reconcileReceipt('a',{tracked:discarded},{send},true))throw Error('Dismissed uncertainty reconciled');
+            }
+            if(unconfirmedSends.has('a') || pendingSends.has('a') || trackedFor('a').length || settleSend('a',discarded,{status:429,body:{detail:'late'}}))throw Error('Dismissal resurrected text or retained capacity');
+            api=async()=>{posts++;const error=Error('Session is trashed');error.status=409;throw error;};newSendId=()=> 'b'.repeat(32);
+            input.value='Server decides';await sendMessage();
+            if(posts!==2 || events!==2 || !unconfirmedSends.get('a').some(item=>item.id==='b'.repeat(32) && item.failed && item.text==='Server decides'))throw Error('Server refusal text lost');
+        })()`);
+    });
+
+    test(`${name}: unknown capability never implies canonical coverage of local IDs`, async () => {
+        const run=await controller(name);
+        run(`
+            currentSession='a';sendIdentityAvailable=false;
+            const a=submission('a0'),b=submission('a1');addDisplay('a',a);addDisplay('a',b);
+            globalThis.LimilinkHistory={canonicalSendIds:()=>new Set()};pinChatToBottom=()=>{};
+            historyView={render:(history,local)=>{if(!Array.isArray(local) || local.map(item=>item.id).join(',')!=='a0,a1')throw Error('Unknown capability used ambiguous legacy coverage');}};
+            renderHistory([{role:'user',content:'same'}]);
+            if(displaySends.get('a').size!==2)throw Error('Missing metadata retired local records');
         `);
     });
 

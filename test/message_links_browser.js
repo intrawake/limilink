@@ -29,7 +29,7 @@ async page => {
     let revision = 0, held = null;
     const snapshot = '**/sessions/session_c/snapshot*';
     await page.route(snapshot, route => route.fulfill({ json: {
-        revision: 'links-' + revision, history, busy: false, busy_sessions: [], reply: { state: 'unknown' },
+        revision: 'links-' + revision, history, busy: false, busy_sessions: [], reply: { state: 'unknown' }, send_identities: true,
     } }));
     await page.route('**/chat', route => new Promise(resolve => { held = { route, resolve }; }));
     const outsideRequests = [];
@@ -96,7 +96,8 @@ async page => {
         await page.evaluate(() => syncSnapshot({ force: true }));
         check(await chat.locator('a[data-optimistic="kept"]').count() === 1, 'Unchanged snapshot removed optimistic link');
         check(await chat.getByRole('link', { name: 'https://example.invalid/pending', exact: true }).count() === 1, 'Optimistic autolink absent');
-        history.push({ role: 'user', content: sent }, bot('Reply [Appended](/appended)'));
+        check(held, 'Synthetic Send was not intercepted');
+        history.push({ role: 'user', content: sent, request_id: held.route.request().postDataJSON().request_id }, bot('Reply [Appended](/appended)'));
         revision++;
         await page.evaluate(() => syncSnapshot({ force: true }));
         check(await chat.getByRole('link', { name: 'Appended', exact: true }).count() === 1, 'Appended reply not linkified');
@@ -104,7 +105,7 @@ async page => {
         check(await chat.locator('.message[data-kept="yes"]').count() === 1, 'Linkification rebuilt old canonical nodes');
         check(held, 'Synthetic Send was not intercepted');
         await held.route.fulfill({ json: { reply: 'Reply [Appended](/appended)' } }); held.resolve(); held = null;
-        await page.waitForFunction(() => pendingSends.size === 0 && !sendButton.disabled);
+        await page.waitForFunction(() => pendingSends.size === 0 && activePosts.size === 0 && activeSnapshot === null);
         return { controller: variant, labelled: true, autolinks: ['http', 'https'], relative: true,
             literal: ['code', 'unfinished fence', 'HTML', 'images', 'unsafe schemes'],
             stages: ['history', 'older', 'optimistic', 'canonical append'], widths: [1280, 375, 320],

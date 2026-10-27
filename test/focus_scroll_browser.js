@@ -41,7 +41,7 @@ async page => {
             await captured;
             await page.evaluate(() => new Promise(requestAnimationFrame));
             const during = await measure();
-            check(await page.locator('#send-btn').isDisabled(), 'Foreground revalidation allowed a send before fresh state');
+            check(await page.locator('#send-btn').isEnabled(), 'Healthy foreground revalidation disabled Send');
             await held.fulfill({ json: state() });
             hold = false;
             await page.waitForFunction(() => activeSnapshot === null);

@@ -40,7 +40,10 @@ async page => {
         // The HTTP limit is global, but !stop has independent capacity on another session.
         await row('session_b').locator('.session-link').click(); await ready('session_b');
         await input.fill('Draft on B');
-        check(await page.locator('#send-btn').isDisabled(), 'Ordinary transports exceeded global bound');
+        check(await page.locator('#send-btn').isEnabled(), 'Transport saturation disabled the Send action');
+        await input.press('Enter');
+        check(posts.length===2 && await input.inputValue()==='Draft on B'
+            && (await page.locator('#notice').textContent()).includes('Not sent: two requests'), 'Transport saturation silently lost a send/draft');
         // IDs are scoped by session: a control in B may reuse an ID pending in A.
         await page.evaluate(id => { globalThis.originalSendId=newSendId;newSendId=()=>id; }, b);
         await input.fill('!stop');

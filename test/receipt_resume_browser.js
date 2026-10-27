@@ -3,7 +3,7 @@ async page => {
     const base = 'http://127.0.0.1:11012';
     if (!page.url().startsWith(base + '/')) throw new Error('Use the isolated fixture.');
     const check = (value, message) => { if (!value) throw new Error(message); };
-    const ready = () => page.waitForFunction(() => !pendingSends.has(currentSession) && !document.querySelector('#send-btn').disabled);
+    const ready = () => page.waitForFunction(() => currentSession && historyReady && connected && !checkingSnapshot && !pendingSends.has(currentSession));
     const warning = page.locator('#unconfirmed-send');
     const input = page.locator('#message-input');
     const run = await page.evaluate(() => Date.now().toString(36));
@@ -143,7 +143,7 @@ async page => {
     await page.locator('#send-btn').click();
     await page.waitForFunction(() => document.querySelector('#connection-status').textContent.includes('Connection lost'));
     check(await warning.isHidden(), 'Malformed complete receipt caused a false acknowledgement/warning');
-    check(await page.locator('#send-btn').isDisabled(), 'Malformed complete receipt cleared pending state');
+    check(await page.evaluate(id => pendingFor(currentSession).some(item => item.id===id && !item.settled), errorId), 'Malformed complete receipt cleared pending state');
     await input.fill('New draft stays');
     invalid = false;
     await ready();

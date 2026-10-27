@@ -149,14 +149,13 @@ function updateHeading() {
 }
 
 function updateInputState() {
-    input.disabled = !currentSession || isTrashed(currentSession);
+    input.disabled = !currentSession;
     const pending = pendingFor(currentSession);
     const busy = serverBusy.has(currentSession);
-    const text = input.value || '';
-    const capacity = hasSendCapacity(currentSession, text) && hasTransportCapacity(text);
-    const legacyBlocked = !sendIdentityAvailable && (busy || pending.length > 0);
-    sendButton.disabled = input.disabled || !historyReady || !connected || (checkingSnapshot && text.trim() !== '!stop') || legacyBlocked || !capacity;
-    sendButton.title = capacity ? '' : 'Pending limit reached. Wait or dismiss saved messages; !stop has separate capacity.';
+    // Cached reads are not admission authority. Keep the action available and
+    // report any genuine local resource limit when the human actually sends.
+    sendButton.disabled = false;
+    sendButton.title = '';
     byId('typing').hidden = !connected || (!busy && !pending.length);
     byId('typing').textContent = busy ? 'Thinking…' : pending.some(item => item.accepted) ? 'Waiting for reply…' : 'Sending…';
 }
@@ -738,7 +737,7 @@ function showUnconfirmed() {
             : 'The send failed. Your message is saved below.';
     byId('unconfirmed-text').textContent = records.map(({ sessionId, request }) =>
         sessionId === currentSession ? request.text : `Removed conversation ${sessionId}:\n${request.text}`).join('\n\n---\n\n');
-    byId('restore-unconfirmed').disabled = !currentSession || isTrashed(currentSession);
+    byId('restore-unconfirmed').disabled = !currentSession;
     byId('restore-unconfirmed').textContent = removed ? 'Restore here as draft' : 'Restore as draft';
 }
 
@@ -816,7 +815,10 @@ function renderHistory(history, followBottom = isScrolledToBottom, finishedBefor
         if (recorded.has(item.id) || (item.settled && finishedBefore.has(item.id))) removeDisplay(currentSession, item);
     }
     const optimistic = [...(displaySends.get(currentSession)?.values() || [])].filter(item => !item.failed);
-    historyView.render(history, sendIdentityAvailable ? optimistic : pendingSends.has(currentSession));
+    // Before capability discovery (or on an older server), absent canonical
+    // IDs cannot prove coverage. Keep each local identity until exact evidence
+    // or a fresh post-completion snapshot retires it.
+    historyView.render(history, optimistic);
     if (followBottom) pinChatToBottom();
     else {
         chat.scrollTop = scrollTop;
@@ -1160,7 +1162,18 @@ function newSendId() {
 
 async function sendMessage() {
     const text = input.value.trim();
-    if (!text || sendButton.disabled || !hasSendCapacity(currentSession, text) || !hasTransportCapacity(text)) return;
+    if (!currentSession) { notice('Choose a conversation first. Your draft is unchanged.'); return; }
+    if (!text) { notice('Write a message first.'); return; }
+    if (!hasSendCapacity(currentSession, text)) {
+        notice('Not sent: local message limit reached. Restore or dismiss saved messages. Your draft is unchanged.');
+        return;
+    }
+    if (!hasTransportCapacity(text)) {
+        notice(text === '!stop'
+            ? 'Not sent: a stop request is still pending. Your draft is unchanged.'
+            : 'Not sent: two requests are still pending. Your draft is unchanged.');
+        return;
+    }
     const id = currentSession;
     let requestId;
     try {
@@ -1168,6 +1181,7 @@ async function sendMessage() {
         if (trackedFor(id).some(item => item.id === requestId)) throw new Error('Duplicate Send identity');
     }
     catch { notice('This browser could not safely identify the send. Your draft has been kept.'); return; }
+    notice();
     const request = { id: requestId, text, needsRecovery: false, accepted: false, settled: false, transport: new AbortController() };
     ++sendGeneration;
     invalidateSnapshot();
@@ -1191,7 +1205,13 @@ async function sendMessage() {
     } catch (error) {
         if (isTracked(id, request) && !request.settled) {
             if (error.status && !error.unconfirmed) settleSend(id, request, { status: error.status, body: { detail: error.message } });
-            else request.needsRecovery = true;
+            else {
+                request.needsRecovery = true;
+                if (!request.accepted) {
+                    removePending(id, request);
+                    preserveUnconfirmed(id, request);
+                }
+            }
         }
     } finally {
         if (activePosts.get(request)?.request === request) activePosts.delete(request);
@@ -1224,7 +1244,7 @@ window.addEventListener('pageshow', resumeUpdates);
 window.addEventListener('focus', resumeUpdates);
 window.addEventListener('online', () => { invalidateSnapshot(); resumeUpdates(); });
 byId('restore-unconfirmed').addEventListener('click', () => {
-    if (!currentSession || isTrashed(currentSession)) return;
+    if (!currentSession) return;
     const records = recoverableForView();
     const saved = records.map(item => item.request.text).join('\n\n');
     if (!saved) return;
@@ -1279,6 +1299,7 @@ document.addEventListener('keydown', event => {
 });
 
 async function initialize() {
+    let readSucceeded = false;
     setDrawer(false, false);
     setSidebarBusy(true);
     try {
@@ -1292,10 +1313,11 @@ async function initialize() {
             onPrepend: () => { isScrolledToBottom = false; chatGeometry = measureChatGeometry(); scheduleReplyRead(); },
         });
         await readSessions();
+        readSucceeded = true;
         const last = savedSession();
         if (sessions.length) await selectSession(sessions.some(session => session.id === last) ? last : sessions[0].id, false);
     } catch (error) { notice(`Could not load sessions: ${error.message}`); }
     finally { setSidebarBusy(false); startPolling(); syncReplyBatch(); }
-    if (!sessions.length && !byId('notice').textContent) await createSession();
+    if (readSucceeded && !sessions.length) await createSession();
 }
 initialize();

@@ -9,7 +9,7 @@ async page => {
     const chat = page.locator('#chat-container');
     const row = id => page.locator(`.session-row[data-session-id="${id}"]`);
     const flush = () => page.evaluate(() => new Promise(requestAnimationFrame));
-    const ready = () => page.waitForFunction(() => !document.querySelector('#send-btn').disabled);
+    const ready = () => page.waitForFunction(() => currentSession && historyReady && connected && !checkingSnapshot && activeSnapshot === null);
     const setVisibility = state => page.evaluate(value => {
         Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => value });
         document.dispatchEvent(new Event('visibilitychange'));
