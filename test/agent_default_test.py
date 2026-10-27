@@ -22,8 +22,8 @@ def mock_config_pi_first():
                         "harness": "pi",
                         "model": "auto",
                     },
-                    "gemini-cli": {
-                        "harness": "gemini-cli",
+                    "pi-other": {
+                        "harness": "pi",
                     },
                 },
             },
@@ -126,7 +126,7 @@ def test_create_session_with_valid_agent(mock_config_pi_first, test_sessions_dir
     """POST /sessions?agent=<valid> should create the session,
     return its ID, and write the .agent_type file."""
     with TestClient(app) as c:
-        response = c.post("/sessions?agent=gemini-cli")
+        response = c.post("/sessions?agent=pi-other")
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "created"
@@ -138,7 +138,7 @@ def test_create_session_with_valid_agent(mock_config_pi_first, test_sessions_dir
     agent_file = os.path.join(session_path, ".agent_type")
     assert os.path.exists(agent_file)
     with open(agent_file) as f:
-        assert f.read().strip() == "gemini-cli"
+        assert f.read().strip() == "pi-other"
 
 
 def test_create_session_with_invalid_agent_fails(mock_config_pi_first):

@@ -26,25 +26,25 @@ def run_server(port, test_sessions_dir, config_path):
 
 
 @pytest.fixture
-def slow_gemini_config(tmp_path):
-    mock_gemini = tmp_path / "mock_gemini.sh"
-    mock_gemini.write_text("#!/bin/bash\nsleep 1\necho 'mocked response'")
-    mock_gemini.chmod(mock_gemini.stat().st_mode | stat.S_IEXEC)
+def slow_pi_config(tmp_path):
+    mock_pi = tmp_path / "mock_pi.sh"
+    mock_pi.write_text("#!/bin/bash\nsleep 1\necho 'mocked response'")
+    mock_pi.chmod(mock_pi.stat().st_mode | stat.S_IEXEC)
 
     config_path = tmp_path / "config.sxpb"
     config_path.write_text(
-        f'(agent_by_alias () (gemini-cli (harness gemini-cli))) (gemini_exepath "{mock_gemini}")'
+        f'(agent_by_alias () (pi-cli (harness pi))) (pi_agent_exepath "{mock_pi}")'
     )
 
     return str(config_path)
 
 
 @pytest.fixture
-def test_server(test_sessions_dir, slow_gemini_config):
+def test_server(test_sessions_dir, slow_pi_config):
     port = get_free_port()
     proc = multiprocessing.Process(
         target=run_server,
-        args=(port, test_sessions_dir, slow_gemini_config),
+        args=(port, test_sessions_dir, slow_pi_config),
         daemon=True,
     )
     proc.start()

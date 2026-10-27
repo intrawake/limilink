@@ -51,11 +51,11 @@ def test_delete_session():
 
 @pytest.mark.asyncio
 @patch("main.asyncio.create_subprocess_exec")
-async def test_chat_endpoint_invokes_gemini(mock_exec, test_sessions_dir):
+async def test_chat_endpoint_invokes_pi(mock_exec, test_sessions_dir):
     # Setup mock subprocess
     mock_process = AsyncMock()
     mock_process.returncode = 0
-    mock_process.communicate.return_value = (b"mocked response from gemini", b"")
+    mock_process.communicate.return_value = (b"mocked response from pi", b"")
     mock_exec.return_value = mock_process
 
     preset_config_path = os.path.abspath(
@@ -71,18 +71,18 @@ async def test_chat_endpoint_invokes_gemini(mock_exec, test_sessions_dir):
         )
 
     assert response.status_code == 200
-    assert response.json() == {"reply": "mocked response from gemini"}
+    assert response.json() == {"reply": "mocked response from pi"}
 
-    # Verify directory was created and marked as project root
+    # Verify directory was created and initialized for Pi
     session_path = os.path.join(test_sessions_dir, "test_chat_session")
     assert os.path.exists(session_path)
-    assert os.path.exists(os.path.join(session_path, ".project_root"))
+    assert os.path.isdir(os.path.join(session_path, ".pi", "agent"))
 
     # Verify the exact command invoked
     mock_exec.assert_called_once()
     called_args = mock_exec.call_args[0]
     # Verify some key arguments
-    assert called_args[0] == "gemini"
+    assert called_args[0] == "pi-agent"
     assert "--model" in called_args
     # We expect auto as it's the default in the preset config
     assert "auto" in called_args
@@ -105,8 +105,8 @@ def test_create_session_initialization(test_sessions_dir):
         session_path = os.path.join(test_sessions_dir, session_id)
         assert os.path.exists(session_path)
         assert os.path.exists(os.path.join(session_path, ".initialized"))
-        assert os.path.exists(os.path.join(session_path, ".project_root"))
-        assert os.path.exists(os.path.join(session_path, "GEMINI.md"))
+        assert os.path.isdir(os.path.join(session_path, ".pi", "agent"))
+        assert os.path.islink(os.path.join(session_path, "ENTITY.md"))
 
         # Check for the test_target.txt symlink
         test_target_link = os.path.join(session_path, "test_target.txt")
@@ -220,7 +220,7 @@ def test_create_session_with_agent_symlinks(test_sessions_dir):
         os.path.join(os.path.dirname(__file__), "..", "preset", "config.sxpb")
     )
     with patch.dict(os.environ, {"LIMILINK_CONFIG": preset_config_path}):
-        response = client.post("/sessions?agent=gemini-cli")
+        response = client.post("/sessions?agent=pi-agent")
         assert response.status_code == 200
         session_id = response.json()["session_id"]
 
@@ -258,14 +258,14 @@ async def test_model_switching(mock_exec):
         # Switch model
         response = c.post(
             "/chat",
-            json={"message": "!model gemini-3.5-ultra", "session_id": session_id},
+            json={"message": "!model test-model", "session_id": session_id},
         )
         assert response.status_code == 200
-        assert "Model switched to: gemini-3.5-ultra" in response.json()["reply"]
+        assert "Model switched to: test-model" in response.json()["reply"]
 
         # Verify switching again
         response = c.post("/chat", json={"message": "!model", "session_id": session_id})
-        assert response.json()["reply"] == "Current model: gemini-3.5-ultra"
+        assert response.json()["reply"] == "Current model: test-model"
 
         # Verify next chat uses the new model
         response = c.post("/chat", json={"message": "hello", "session_id": session_id})
@@ -276,63 +276,17 @@ async def test_model_switching(mock_exec):
         called_args = mock_exec.call_args[0]
         assert "--model" in called_args
         idx = list(called_args).index("--model")
-        assert called_args[idx + 1] == "gemini-3.5-ultra"
+        assert called_args[idx + 1] == "test-model"
 
 
 @pytest.mark.asyncio
 @patch("main.load_config")
 @patch("main.asyncio.create_subprocess_exec")
-async def test_model_switching_with_existing_model_arg(mock_exec, mock_load_config):
-    mock_process = AsyncMock()
-    mock_process.returncode = 0
-    mock_process.communicate.return_value = (b"mocked response", b"")
-    mock_exec.return_value = mock_process
-
-    # Return a mocked config that already has --model in preset args
+async def test_continue_flag_injection(mock_exec, mock_load_config):
+    # Setup a Pi preset.
     mock_load_config.return_value = (
         {
-            "agent_by_alias": {
-                "gemini-cli": {
-                    "harness": "gemini-cli",
-                    "args": ["--model", "gemini-1.5-pro"],
-                }
-            },
-        },
-        "/tmp",
-    )
-
-    session_id = "test_existing_model_arg_session"
-
-    with TestClient(app) as c:
-        # Switch model
-        response = c.post(
-            "/chat",
-            json={"message": "!model gemini-3.5-ultra", "session_id": session_id},
-        )
-        assert response.status_code == 200
-
-        # Verify next chat uses the new model
-        response = c.post("/chat", json={"message": "hello", "session_id": session_id})
-        assert response.status_code == 200
-
-        # Check command
-        mock_exec.assert_called_once()
-        called_args = mock_exec.call_args[0]
-        assert "--model" in called_args
-        idx = list(called_args).index("--model")
-        assert called_args[idx + 1] == "gemini-3.5-ultra"
-        # Make sure there is only one --model flag
-        assert list(called_args).count("--model") == 1
-
-
-@pytest.mark.asyncio
-@patch("main.load_config")
-@patch("main.asyncio.create_subprocess_exec")
-async def test_resume_flag_injection(mock_exec, mock_load_config):
-    # Setup mock config with gemini-cli as the agent (--resume is gemini-cli-specific)
-    mock_load_config.return_value = (
-        {
-            "agent_by_alias": {"gemini-cli": {"harness": "gemini-cli"}},
+            "agent_by_alias": {"pi-agent": {"harness": "pi"}},
         },
         "/test/config/dir",
     )
@@ -350,14 +304,12 @@ async def test_resume_flag_injection(mock_exec, mock_load_config):
         response = c.post("/chat", json={"message": "hello", "session_id": session_id})
         assert response.status_code == 200
 
-    # Verify the exact command invoked includes --resume latest
+    # Verify the command continues the isolated Pi session.
     mock_exec.assert_called_once()
     called_args = mock_exec.call_args[0]
 
-    # Check that --resume latest is present
-    assert "--resume" in called_args
-    idx = list(called_args).index("--resume")
-    assert called_args[idx + 1] == "latest"
+    assert "--continue" in called_args
+    assert "--session-dir" in called_args
 
 
 @pytest.mark.asyncio
@@ -440,146 +392,7 @@ async def test_pi_readonly_restricts_tools(mock_exec, mock_load_config):
 
 
 @pytest.mark.asyncio
-@patch("main.load_config")
-@patch("main.asyncio.create_subprocess_exec")
-async def test_gemini_default_yolo(mock_exec, mock_load_config):
-    """Gemini without readonly_mode_on should pass --yolo."""
-    mock_load_config.return_value = (
-        {
-            "agent_by_alias": {"gemini-cli": {"harness": "gemini-cli"}},
-        },
-        "/test/config/dir",
-    )
-
-    mock_process = AsyncMock()
-    mock_process.returncode = 0
-    mock_process.communicate.return_value = (b"mocked response", b"")
-    mock_exec.return_value = mock_process
-
-    with TestClient(app) as c:
-        response = c.post(
-            "/chat",
-            json={"message": "hello", "session_id": "test_gemini_yolo_session"},
-        )
-
-    assert response.status_code == 200
-    mock_exec.assert_called_once()
-    called_args = mock_exec.call_args[0]
-    assert "--yolo" in called_args
-    assert "--approval-mode" not in called_args
-
-
-@pytest.mark.asyncio
-@patch("main.load_config")
-@patch("main.asyncio.create_subprocess_exec")
-async def test_gemini_readonly_plan(mock_exec, mock_load_config):
-    """Gemini readonly_mode_on should pass --approval-mode plan instead of --yolo."""
-    mock_load_config.return_value = (
-        {
-            "agent_by_alias": {
-                "gemini-readonly": {
-                    "harness": "gemini-cli",
-                    "readonly_mode_on": True,
-                }
-            },
-        },
-        "/test/config/dir",
-    )
-
-    mock_process = AsyncMock()
-    mock_process.returncode = 0
-    mock_process.communicate.return_value = (b"mocked response", b"")
-    mock_exec.return_value = mock_process
-
-    with TestClient(app) as c:
-        response = c.post(
-            "/chat",
-            json={"message": "hello", "session_id": "test_gemini_readonly_session"},
-        )
-
-    assert response.status_code == 200
-    mock_exec.assert_called_once()
-    called_args = mock_exec.call_args[0]
-    assert "--approval-mode" in called_args
-    am_idx = list(called_args).index("--approval-mode")
-    assert called_args[am_idx + 1] == "plan"
-    assert "--yolo" not in called_args
-
-
-@pytest.mark.asyncio
-@patch("main.load_config")
-@patch("main.asyncio.create_subprocess_exec")
-async def test_gemini_preset_args_are_merged(mock_exec, mock_load_config):
-    """Gemini preset args should be merged with generated approval flags."""
-    mock_load_config.return_value = (
-        {
-            "agent_by_alias": {
-                "gemini-custom": {
-                    "harness": "gemini-cli",
-                    "args": ["--my-custom-flag"],
-                }
-            },
-        },
-        "/test/config/dir",
-    )
-
-    mock_process = AsyncMock()
-    mock_process.returncode = 0
-    mock_process.communicate.return_value = (b"mocked response", b"")
-    mock_exec.return_value = mock_process
-
-    with TestClient(app) as c:
-        response = c.post(
-            "/chat",
-            json={
-                "message": "hello",
-                "session_id": "test_gemini_custom_args_session",
-            },
-        )
-
-    assert response.status_code == 200
-    mock_exec.assert_called_once()
-    called_args = mock_exec.call_args[0]
-    assert "--my-custom-flag" in called_args
-    # Generated approval flags still come through
-    assert "--yolo" in called_args
-    # --resume latest injected by code
-    assert "--resume" in called_args
-
-
-@pytest.mark.asyncio
-@patch("main.load_config")
-@patch("main.asyncio.create_subprocess_exec")
-async def test_gemini_node_args_used(mock_exec, mock_load_config):
-    """Gemini without preset args should use gemini_node_args from config."""
-    mock_load_config.return_value = (
-        {
-            "agent_by_alias": {"gemini-cli": {"harness": "gemini-cli"}},
-            "gemini_node_args": ["--no-warnings=DEP0040", "--", "/path/to/gemini"],
-        },
-        "/test/config/dir",
-    )
-
-    mock_process = AsyncMock()
-    mock_process.returncode = 0
-    mock_process.communicate.return_value = (b"mocked response", b"")
-    mock_exec.return_value = mock_process
-
-    with TestClient(app) as c:
-        response = c.post(
-            "/chat",
-            json={"message": "hello", "session_id": "test_gemini_node_args_session"},
-        )
-
-    assert response.status_code == 200
-    mock_exec.assert_called_once()
-    called_args = mock_exec.call_args[0]
-    assert "--no-warnings=DEP0040" in called_args
-    assert "--yolo" in called_args
-
-
-@pytest.mark.asyncio
-async def test_project_root_creation_on_chat(test_sessions_dir):
+async def test_pi_directory_creation_on_chat(test_sessions_dir):
     session_id = "test_project_root_session"
     session_path = os.path.join(test_sessions_dir, session_id)
 
@@ -599,9 +412,9 @@ async def test_project_root_creation_on_chat(test_sessions_dir):
             )
             assert response.status_code == 200
 
-    # Verify directory and .project_root exist
+    # Verify Pi session directories exist
     assert os.path.exists(session_path)
-    assert os.path.exists(os.path.join(session_path, ".project_root"))
+    assert os.path.isdir(os.path.join(session_path, ".pi", "agent"))
 
 
 @pytest.mark.asyncio
@@ -609,7 +422,7 @@ async def test_project_root_creation_on_chat(test_sessions_dir):
 async def test_tmpdir_isolation_and_cleanup(mock_exec, test_sessions_dir):
     """TMPDIR is set to a per-session tmp/ dir and cleaned up after each request.
 
-    Verifies the isolation story: pi/gemini-cli temp files go into
+    Verifies the isolation story: pi/pi-agent temp files go into
     <session>/tmp/ instead of polluting the system /tmp, and that directory
     is wiped after every chat request completes.
     """
@@ -684,7 +497,7 @@ async def test_env_vars_canonical_env_dict(mock_exec, mock_load_config):
 
     mock_load_config.return_value = (
         {
-            "agent_by_alias": {"gemini-cli": {"harness": "gemini-cli"}},
+            "agent_by_alias": {"pi-agent": {"harness": "pi"}},
             "env_dict": {"MY_VAR": "my_val"},
         },
         "/tmp",
@@ -908,7 +721,7 @@ async def test_run_notifyme_task_agent_error_still_delivers_raw(test_sessions_di
 def test_unrecognized_exclamation_command_not_forwarded(mock_load_config):
     """Unrecognized ! commands return an error and are never forwarded to the agent."""
     mock_load_config.return_value = (
-        {"agent_by_alias": {"gemini-cli": {"harness": "gemini-cli"}}},
+        {"agent_by_alias": {"pi-agent": {"harness": "pi"}}},
         "/fake/config/dir",
     )
     session_id = "test_bang_unknown"

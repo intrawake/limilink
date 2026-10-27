@@ -33,13 +33,10 @@ app = FastAPI()
 
 
 class HarnessType(str, Enum):
-    GEMINI_CLI = "gemini-cli"
     PI = "pi"
 
     @classmethod
     def from_str(cls, value: str) -> HarnessType:
-        if value in ("gemini", "gemini-cli"):
-            return cls.GEMINI_CLI
         if value in ("pi", "pi-agent"):
             return cls.PI
         raise ValueError(f"Unsupported harness type: {value}")
@@ -282,20 +279,6 @@ def ensure_session_initialized(
     if os.path.exists(init_marker):
         return
 
-    # Mark it as a project root so gemini-cli scopes history to this folder.
-    project_root_marker = os.path.join(session_path, ".project_root")
-    if not os.path.exists(project_root_marker):
-        with open(project_root_marker, "a"):
-            pass
-
-    workspace_md_rel = cfg.get("gemini_workspace_md")
-    if workspace_md_rel:
-        workspace_md_abs = resolve_config_path(workspace_md_rel, config_dir)
-        if os.path.exists(workspace_md_abs):
-            target_md = os.path.join(session_path, "GEMINI.md")
-            if not os.path.exists(target_md):
-                shutil.copy2(workspace_md_abs, target_md)
-
     os.makedirs(os.path.join(session_path, "outbox"), exist_ok=True)
     os.makedirs(os.path.join(session_path, ".pi", "agent"), exist_ok=True)
     reconcile_session_symlinks(session_path, cfg, config_dir, agent_alias)
@@ -336,14 +319,18 @@ async def create_session(agent: str | None = None):
     # Resolve the default before initialization so its agent-specific resources
     # are present from the first message onward.
     effective_agent = agent or next(iter(agent_by_alias))
-    valid_agents = (
-        list(HarnessType) + ["gemini", "pi-agent"] + list(agent_by_alias.keys())
-    )
+    valid_agents = list(HarnessType) + ["pi-agent"] + list(agent_by_alias.keys())
     if effective_agent not in valid_agents:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid agent '{effective_agent}'. Supported: {', '.join(sorted(set(valid_agents)))}",
         )
+
+    preset = agent_by_alias.get(effective_agent, {})
+    try:
+        HarnessType.from_str(preset.get("harness", effective_agent))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     session_path = os.path.join(sessions_dir, safe_id)
     os.makedirs(session_path, exist_ok=True)
@@ -489,7 +476,7 @@ async def process_chat(session_id: str, message: str) -> str:
         session_path = os.path.join(sessions_dir, safe_session_id)
         os.makedirs(session_path, exist_ok=True)
 
-        # Per-session tmp directory so pi/gemini-cli temp files are isolated
+        # Per-session tmp directory so Pi temp files are isolated
         session_tmp = get_session_tmp_dir(session_path)
         os.makedirs(session_tmp, exist_ok=True)
 
@@ -514,13 +501,11 @@ async def process_chat(session_id: str, message: str) -> str:
         # Resolve preset if it exists
         preset = agent_by_alias.get(agent_alias, {})
 
-        # Determine and normalize harness
-        harness_str = preset.get("harness", agent_alias)
+        # Keep !agent and !stop usable for retired sessions; never switch silently.
         try:
-            harness = HarnessType.from_str(harness_str)
+            harness = HarnessType.from_str(preset.get("harness", agent_alias))
         except ValueError:
-            # Fallback for old/direct values if not in agent_by_alias
-            harness = HarnessType.GEMINI_CLI  # Default fallback
+            harness = None
 
         # Determine model for this session
         model_path = os.path.join(session_path, ".model")
@@ -532,10 +517,8 @@ async def process_chat(session_id: str, message: str) -> str:
         if not current_model:
             if preset.get("model"):
                 current_model = preset.get("model")
-            elif harness == HarnessType.PI:
-                current_model = cfg.get("pi_agent_model", "auto")
             else:
-                current_model = "auto"
+                current_model = cfg.get("pi_agent_model", "auto")
 
         # A session override takes precedence over the selected agent preset and
         # survives Limilink restarts. Switching agents clears the override.
@@ -577,34 +560,39 @@ async def process_chat(session_id: str, message: str) -> str:
 
             # Valid agents are aliases OR raw harness types
             valid_agents = (
-                list(HarnessType) + ["gemini", "pi-agent"] + list(agent_by_alias.keys())
+                list(HarnessType) + ["pi-agent"] + list(agent_by_alias.keys())
             )
             if new_agent not in valid_agents:
                 reply = f"Invalid agent. Supported aliases or harnesses: {', '.join(valid_agents)}"
                 append_to_history(session_path, "bot", reply)
                 return reply
+            new_preset = agent_by_alias.get(new_agent, {})
+            try:
+                HarnessType.from_str(new_preset.get("harness", new_agent))
+            except ValueError:
+                reply = "Unsupported harness. Only Pi is supported."
+                append_to_history(session_path, "bot", reply)
+                return reply
+
             async with aiofiles.open(agent_path, "w") as f:
                 await f.write(new_agent)
 
-            # Agent presets own their auth/resources and defaults. Reconcile only
-            # when the agent changes, not on every subsequent chat request.
+            # Agent presets own their auth/resources and defaults.
             reconcile_session_symlinks(session_path, cfg, config_dir, new_agent)
             if os.path.exists(model_path):
                 os.unlink(model_path)
             set_reasoning_effort_override(session_path, None)
-
-            new_preset = agent_by_alias.get(new_agent, {})
-            new_harness_str = new_preset.get("harness", new_agent)
-            try:
-                new_harness = HarnessType.from_str(new_harness_str)
-            except ValueError:
-                new_harness = HarnessType.GEMINI_CLI
-            if new_harness == HarnessType.PI:
-                write_pi_settings_json(session_path, new_preset.get("reasoning_effort"))
+            write_pi_settings_json(session_path, new_preset.get("reasoning_effort"))
 
             reply = f"Agent switched to: {new_agent}"
             append_to_history(session_path, "bot", reply)
             return reply
+
+        if harness is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported agent '{agent_alias}'. Only Pi is supported; use !agent <pi-alias> to continue this session.",
+            )
 
         # Handle model switching command
         if message.startswith("!model"):
@@ -625,11 +613,6 @@ async def process_chat(session_id: str, message: str) -> str:
         # Handle reasoning effort command (pi harness only)
         if message.startswith("!reasoning_effort"):
             append_to_history(session_path, "user", message)
-            if harness != HarnessType.PI:
-                reply = "!reasoning_effort is only available for the pi harness."
-                append_to_history(session_path, "bot", reply)
-                return reply
-
             parts = message.split(maxsplit=1)
 
             if len(parts) == 1:
@@ -770,11 +753,6 @@ async def process_chat(session_id: str, message: str) -> str:
         stripped_message = message.strip()
         if stripped_message == "!trace" or stripped_message.startswith("!trace "):
             append_to_history(session_path, "user", message)
-            if harness != HarnessType.PI:
-                reply = "!trace is only available for the pi harness."
-                append_to_history(session_path, "bot", reply)
-                return reply
-
             parts = stripped_message.split()
             if len(parts) not in (2, 3):
                 reply = "Usage: !trace tool [COUNT]"
@@ -844,11 +822,6 @@ async def process_chat(session_id: str, message: str) -> str:
         # Handle stat command (pi harness only)
         if message.strip() == "!stat":
             append_to_history(session_path, "user", message)
-            if harness != HarnessType.PI:
-                reply = "!stat is only available for the pi harness."
-                append_to_history(session_path, "bot", reply)
-                return reply
-
             pi_agent_dir = os.path.join(session_path, ".pi", "agent", "session")
             if not os.path.isdir(pi_agent_dir):
                 reply = "No pi-agent session data found. Send a message first!"
@@ -905,11 +878,6 @@ async def process_chat(session_id: str, message: str) -> str:
         stripped_message = message.strip()
         if stripped_message == "!compact" or stripped_message.startswith("!compact "):
             append_to_history(session_path, "user", message)
-            if harness != HarnessType.PI:
-                reply = "!compact is only available for the pi harness."
-                append_to_history(session_path, "bot", reply)
-                return reply
-
             pi_session_dir = os.path.join(session_path, ".pi", "agent", "session")
             if not os.path.isdir(pi_session_dir) or not any(
                 f.endswith(".jsonl") for f in os.listdir(pi_session_dir)
@@ -1038,80 +1006,48 @@ async def process_chat(session_id: str, message: str) -> str:
         env["LIMILINK_SESSION"] = safe_session_id
         env["TMPDIR"] = get_session_tmp_dir(session_path)
 
-        if harness == HarnessType.PI:
-            pi_agent_dir = os.path.join(session_path, ".pi", "agent")
+        pi_agent_dir = os.path.join(session_path, ".pi", "agent")
 
-            # Synchronize Limilink's thinking default while preserving other Pi
-            # settings. Provider and model metadata remain user-owned resources.
-            write_pi_settings_json(session_path, current_reasoning_effort)
+        # Synchronize Limilink's thinking default while preserving other Pi
+        # settings. Provider and model metadata remain user-owned resources.
+        write_pi_settings_json(session_path, current_reasoning_effort)
 
-            exepath = cfg.get("pi_agent_exepath", "pi-agent")
+        exepath = cfg.get("pi_agent_exepath", "pi-agent")
 
-            # pi-agent env vars
-            env["PI_CODING_AGENT_DIR"] = pi_agent_dir
+        # pi-agent env vars
+        env["PI_CODING_AGENT_DIR"] = pi_agent_dir
 
-            # Build pi-agent args
-            is_readonly = preset.get("readonly_mode_on", False)
-            if is_readonly:
-                agent_args = ["--no-tools", "--tools", "read,grep,find,ls"]
-            else:
-                agent_args = ["--approve"]
-            provider_name = preset.get("provider")
-            if provider_name:
-                agent_args += ["--provider", provider_name]
-            agent_args += ["--model", current_model]
-            if current_reasoning_effort:
-                # A continued Pi session restores its recorded thinking level in
-                # preference to defaults, so this must be an explicit CLI option.
-                agent_args += ["--thinking", current_reasoning_effort]
-            agent_args += ["--session-dir", ".pi/agent/session"]
-            # Specification of --session on the first run of a new session directory
-            # causes "No session found matching..." error. pi-agent should just
-            # use the isolated directory naturally.
-
-            if os.path.exists(os.path.join(session_path, "SYSTEM.md")):
-                agent_args += [
-                    "--system-prompt",
-                    os.path.abspath(os.path.join(session_path, "SYSTEM.md")),
-                ]
-            if os.path.exists(os.path.join(session_path, "ENTITY.md")):
-                agent_args += [
-                    "--append-system-prompt",
-                    os.path.abspath(os.path.join(session_path, "ENTITY.md")),
-                ]
-
-            cmd = [exepath] + agent_args + ["--continue", "-p", message]
+        # Build pi-agent args
+        is_readonly = preset.get("readonly_mode_on", False)
+        if is_readonly:
+            agent_args = ["--no-tools", "--tools", "read,grep,find,ls"]
         else:
-            exepath = cfg.get("gemini_exepath", "gemini")
-            # Build args: node wrapper + preset extra args + generated approval.
-            # Preset args are additional, not a replacement — approval flags always apply.
-            args = list(cfg.get("gemini_node_args", []))
-            preset_args = preset.get("args", [])
-            if isinstance(preset_args, list):
-                args += preset_args
-            is_readonly = preset.get("readonly_mode_on", False)
-            if is_readonly:
-                args += ["--approval-mode", "plan"]
-            else:
-                args += ["--yolo"]
+            agent_args = ["--approve"]
+        provider_name = preset.get("provider")
+        if provider_name:
+            agent_args += ["--provider", provider_name]
+        agent_args += ["--model", current_model]
+        if current_reasoning_effort:
+            # A continued Pi session restores its recorded thinking level in
+            # preference to defaults, so this must be an explicit CLI option.
+            agent_args += ["--thinking", current_reasoning_effort]
+        agent_args += ["--session-dir", ".pi/agent/session"]
+        # Specification of --session on the first run of a new session directory
+        # causes "No session found matching..." error. pi-agent should just
+        # use the isolated directory naturally.
 
-            # Inject --model into args if not already present or replace it
-            if "--model" in args:
-                new_args = list(args)
-                for idx, arg in enumerate(new_args):
-                    if arg == "--model" and idx + 1 < len(new_args):
-                        new_args[idx + 1] = current_model
-                        break
-                args = new_args
-            else:
-                args += ["--model", current_model]
+        if os.path.exists(os.path.join(session_path, "SYSTEM.md")):
+            agent_args += [
+                "--system-prompt",
+                os.path.abspath(os.path.join(session_path, "SYSTEM.md")),
+            ]
+        if os.path.exists(os.path.join(session_path, "ENTITY.md")):
+            agent_args += [
+                "--append-system-prompt",
+                os.path.abspath(os.path.join(session_path, "ENTITY.md")),
+            ]
 
-            # Inject --resume latest if not already present
-            if "--resume" not in args:
-                args += ["--resume", "latest"]
-
-            cmd = [exepath] + args + ["-p", message]
-
+        cmd = [exepath] + agent_args + ["--continue", "-p", message]
         # Add configured global environment variables (shared by all agents)
         env.update(global_env_dict(cfg))
 
@@ -1121,25 +1057,6 @@ async def process_chat(session_id: str, message: str) -> str:
             for name, value in preset_env_dict.items():
                 if isinstance(value, str):
                     env[name] = value
-
-        # Inject system.md path if configured (for gemini-cli)
-        if harness == HarnessType.GEMINI_CLI:
-            system_md_rel = cfg.get("gemini_system_md")
-            if system_md_rel:
-                system_md_rel = os.path.expanduser(system_md_rel)
-                system_md_abs = (
-                    system_md_rel
-                    if os.path.isabs(system_md_rel)
-                    else os.path.abspath(os.path.join(config_dir, system_md_rel))
-                )
-                env["GEMINI_SYSTEM_MD"] = system_md_abs
-            elif "GEMINI_SYSTEM_MD" in env and not os.path.isabs(
-                env["GEMINI_SYSTEM_MD"]
-            ):
-                # Fallback path logic if it was provided directly in env list
-                env["GEMINI_SYSTEM_MD"] = os.path.normpath(
-                    os.path.join(config_dir, env["GEMINI_SYSTEM_MD"])
-                )
 
         # Apply session environment overrides
         env_overrides_path = os.path.join(session_path, ".env_overrides.json")
@@ -1166,7 +1083,7 @@ async def process_chat(session_id: str, message: str) -> str:
 
         lock = get_session_lock(safe_session_id)
         async with lock:
-            max_attempts = 3 if harness == HarnessType.PI else 1
+            max_attempts = 3
             for attempt in range(max_attempts):
                 process = await asyncio.create_subprocess_exec(
                     *cmd,
@@ -1207,7 +1124,7 @@ async def process_chat(session_id: str, message: str) -> str:
                 if retcode is None or retcode == 0:
                     reply_text = stdout.decode().strip()
                     reply_text = re.sub(r".*\n\[Thought: true\]", "", reply_text)
-                    if not reply_text and harness == HarnessType.PI:
+                    if not reply_text:
                         retcode = 1
                         error_msg = "pi-agent exited 0 but produced no output."
                     else:

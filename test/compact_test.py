@@ -20,15 +20,6 @@ PI_CONFIG = {
     "pi_agent_exepath": "pi-agent",
 }
 
-GEMINI_CONFIG = {
-    "agent_by_alias": {
-        "gemini-test": {
-            "harness": "gemini-cli",
-            "model": "test-model",
-        }
-    },
-}
-
 
 def _make_rpc_process(response_data: dict | None = None):
     """Create a mock subprocess that emits a compact RPC response on stdout."""
@@ -61,25 +52,6 @@ def _create_pi_session(test_sessions_dir: str, session_id: str):
     with open(os.path.join(pi_session_dir, "fake.jsonl"), "w") as f:
         f.write("{}\n")
     return session_path
-
-
-@pytest.mark.asyncio
-async def test_compact_rejects_non_pi_harness(test_sessions_dir):
-    session_id = "test_compact_gemini"
-    session_path = os.path.join(test_sessions_dir, session_id)
-    os.makedirs(session_path, exist_ok=True)
-    async with aiofiles.open(os.path.join(session_path, ".agent_type"), "w") as f:
-        await f.write("gemini-test")
-
-    with patch("main.load_config", return_value=(GEMINI_CONFIG, "/test")):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
-            response = await ac.post(
-                "/chat", json={"message": "!compact", "session_id": session_id}
-            )
-
-    assert response.status_code == 200
-    assert "only available for the pi harness" in response.json()["reply"]
 
 
 @pytest.mark.asyncio

@@ -1,12 +1,9 @@
 [project]
 name = "limilink"
 version = "0.1.0"
-description = "A web chat proxy to bridge the dreamscape persona via gemini-cli."
+description = "A mobile-friendly web chat interface for Pi."
 readme = "README.md"
 license = { text = "0BSD" }
-authors = [
-  { name = "paprika-bot", email = "sockpaprika-git@intrawake.com" }
-]
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.111.0",
@@ -45,6 +42,10 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
+addopts = [
+    "-q",
+    "--import-mode=importlib",
+]
 pythonpath = ["src", "."]
 testpaths = ["test"]
 
@@ -53,7 +54,7 @@ limilink = { shell = "PYTHONPATH=src python src/server.py" }
 preset_server = { shell = "PYTHONPATH=src python src/server.py --config preset/config.sxpb" }
 limilink-discord = { shell = "PYTHONPATH=src python demo/discord_bot.py" }
 preset_discord_bot = { shell = "LIMILINK_CONFIG=preset/config.sxpb PYTHONPATH=src python demo/discord_bot.py" }
-test = "pytest -q"
+test = "pytest"
 check-format = "ruff check"
 check-type = "ty check"
 lint-sxpb = "sxpb-lint --ignore-file .gitignore"

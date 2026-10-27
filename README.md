@@ -1,6 +1,6 @@
 # limilink
 
-A mobile-friendly web chat proxy to bridge the dreamscape persona via `gemini-cli`.
+A mobile-friendly web chat interface for the Pi agent harness.
 
 ## Development
 Run the server:

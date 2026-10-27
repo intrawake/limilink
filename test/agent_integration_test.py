@@ -15,7 +15,7 @@ def mock_config():
         mock.return_value = (
             {
                 "agent_by_alias": {
-                    "gemini-cli": {"harness": "gemini-cli"},
+                    "pi-default": {"harness": "pi"},
                     "pi-agent": {"harness": "pi"},
                 },
             },
@@ -35,10 +35,10 @@ async def test_agent_switching(mock_exec, mock_config):
     session_id = "test_agent_switch_session"
 
     with TestClient(app) as c:
-        # Check current agent (default should be gemini-cli)
+        # Check current agent (default should be pi-default)
         response = c.post("/chat", json={"message": "!agent", "session_id": session_id})
         assert response.status_code == 200
-        assert "Current agent: gemini-cli" in response.json()["reply"]
+        assert "Current agent: pi-default" in response.json()["reply"]
 
         # Switch agent
         response = c.post(
@@ -167,20 +167,6 @@ async def test_pi_agent_env_vars(mock_exec, mock_config):
 
 
 @pytest.mark.asyncio
-async def test_stat_gemini_cli_harness(mock_config):
-    """!stat on gemini-cli harness should say it's pi-only."""
-    session_id = "test_stat_gemini"
-
-    with TestClient(app) as c:
-        response = c.post(
-            "/chat",
-            json={"message": "!stat", "session_id": session_id},
-        )
-        assert response.status_code == 200
-        assert "only available for the pi harness" in response.json()["reply"]
-
-
-@pytest.mark.asyncio
 async def test_stat_pi_no_data(mock_config):
     """!stat on pi-agent with no .pi-agent dir should say no data."""
     session_id = "test_stat_pi_no_data"
@@ -199,20 +185,6 @@ async def test_stat_pi_no_data(mock_config):
         )
         assert response.status_code == 200
         assert "No pi-agent session data found" in response.json()["reply"]
-
-
-@pytest.mark.asyncio
-async def test_reasoning_effort_gemini_cli(mock_config):
-    """!reasoning_effort on gemini-cli harness should say it's pi-only."""
-    session_id = "test_reasoning_effort_gemini"
-
-    with TestClient(app) as c:
-        response = c.post(
-            "/chat",
-            json={"message": "!reasoning_effort", "session_id": session_id},
-        )
-        assert response.status_code == 200
-        assert "only available for the pi harness" in response.json()["reply"]
 
 
 @pytest.mark.asyncio
@@ -518,19 +490,6 @@ async def test_stat_pi_with_data(mock_exec, mock_config, test_sessions_dir):
     assert cmd[0] == "python3"
     assert cmd[1].endswith("pi_session_stat.py")
     assert cmd[2].endswith("test.jsonl")
-
-
-@pytest.mark.asyncio
-async def test_trace_gemini_cli_harness(mock_config):
-    """!trace on gemini-cli harness should say it is pi-only."""
-    with TestClient(app) as c:
-        response = c.post(
-            "/chat",
-            json={"message": "!trace tool 5", "session_id": "test_trace_gemini"},
-        )
-
-    assert response.status_code == 200
-    assert "only available for the pi harness" in response.json()["reply"]
 
 
 @pytest.mark.asyncio

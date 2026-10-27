@@ -13,17 +13,17 @@ async def test_concurrency_lock():
         transport=ASGITransport(app=app), base_url="http://test"
     ) as client:
 
-        async def slow_gemini(*args, **kwargs):
+        async def slow_pi(*args, **kwargs):
             await asyncio.sleep(0.5)
             mock_process = AsyncMock()
             mock_process.returncode = 0
             mock_process.communicate.return_value = (
-                b"mocked response from gemini",
+                b"mocked response from pi",
                 b"",
             )
             return mock_process
 
-        with patch("main.asyncio.create_subprocess_exec", side_effect=slow_gemini):
+        with patch("main.asyncio.create_subprocess_exec", side_effect=slow_pi):
             req1 = client.post(
                 "/chat", json={"session_id": "test_session", "message": "1"}
             )
