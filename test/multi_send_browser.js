@@ -3,15 +3,7 @@ async page => {
     const base = 'http://127.0.0.1:11012';
     if (!page.url().startsWith(base + '/')) throw Error('Use the isolated fixture.');
     const check = (value, message) => { if (!value) throw Error(message); };
-    const variant = await page.evaluate(() => new URL(location.href).searchParams.get('controller') || 'follow');
-    if (variant === 'steady') {
-        const script = await (await page.request.get(base + '/steady.js')).text();
-        const css = await (await page.request.get(base + '/drawer.css')).text();
-        const html = (await (await page.request.get(page.url())).text()).replace('</body>', '<button id="rename-current" hidden>Rename</button></body>');
-        await page.route('**/follow.js', route => route.fulfill({body:script,contentType:'text/javascript'}));
-        await page.route('**/arrange.css', route => route.fulfill({body:css,contentType:'text/css'}));
-        await page.route('**/?controller=steady', route => route.fulfill({body:html,contentType:'text/html'}));
-    }
+    const variant = 'follow';
     const held = [], posts = [];
     const row = id => page.locator(`.session-row[data-session-id="${id}"]`);
     const ready = id => page.waitForFunction(id => currentSession === id && historyReady && connected && !checkingSnapshot, id);
@@ -125,6 +117,5 @@ async page => {
         if(forwarded) await forwarded.catch(()=>{});
         for(const route of held) {try{await route.abort('failed');}catch{}}
         await page.unroute('**/chat');
-        if(variant==='steady') {await page.unroute('**/follow.js');await page.unroute('**/arrange.css');await page.unroute('**/?controller=steady');}
     }
 }

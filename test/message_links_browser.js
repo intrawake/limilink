@@ -3,18 +3,13 @@ async page => {
     const base = 'http://127.0.0.1:11012';
     if (!page.url().startsWith(base + '/')) throw Error('Use the isolated fixture.');
     const check = (value, message) => { if (!value) throw Error(message); };
-    const variant = await page.evaluate(() => new URL(location.href).searchParams.get('controller') || 'follow');
-    if (variant === 'steady') {
-        const script = await (await page.request.get(base + '/steady.js')).text();
-        const css = await (await page.request.get(base + '/drawer.css')).text();
-        await page.route('**/follow.js', route => route.fulfill({ body: script, contentType: 'text/javascript' }));
-        await page.route('**/arrange.css', route => route.fulfill({ body: css, contentType: 'text/css' }));
-        const html = (await (await page.request.get(page.url())).text())
-            .replace('    <script src="/history-view.js?v=3" defer></script>\n', '<script>globalThis.LimilinkHistory={version:2,create(){throw Error("Stale helper used");}}</script>\n')
-            .replace('    <script src="/reply-state.js?v=1" defer></script>\n', '')
-            .replace('</body>', '<button id="rename-current" hidden>Rename</button></body>');
-        await page.route('**/?controller=steady', route => route.fulfill({ body: html, contentType: 'text/html' }));
-    }
+    const variant = 'follow';
+    // The current controller must upgrade a stale helper without an old UI copy.
+    const entry = page.url();
+    const html = (await (await page.request.get(entry)).text())
+        .replace('    <script src="/history-view.js?v=3" defer></script>\n', '<script>globalThis.LimilinkHistory={version:2,create(){throw Error("Stale helper used");}}</script>\n')
+        .replace('    <script src="/reply-state.js?v=1" defer></script>\n', '');
+    await page.route(entry, route => route.fulfill({ body: html, contentType: 'text/html' }));
     const bot = content => ({ role: 'bot', content });
     const history = Array.from({ length: 60 }, (_, i) => bot(i ? 'Padding ' + i : '[Older](/older)'));
     history.push(...[
@@ -114,6 +109,7 @@ async page => {
         if (held) { await held.route.fulfill({ status: 500, json: { detail: 'Fixture cleanup' } }); held.resolve(); }
         await page.unroute('**/chat');
         await page.unroute(snapshot);
+        await page.unroute(entry);
         await page.context().unroute('https://example.invalid/**');
     }
 }

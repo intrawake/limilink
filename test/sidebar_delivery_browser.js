@@ -1,18 +1,9 @@
 // Disposable --fake-chat fixture only; no real provider calls.
-// Add ?controller=steady to exercise the preceding cached-page controller.
 async page => {
     const base = 'http://127.0.0.1:11012';
     if (!page.url().startsWith(base + '/')) throw Error('Use the isolated fixture.');
     const check = (value, message) => { if (!value) throw Error(message); };
-    const variant = await page.evaluate(() => new URL(location.href).searchParams.get('controller') || 'follow');
-    if (variant === 'steady') {
-        const body = await (await page.request.get(`${base}/steady.js`)).text();
-        await page.route('**/follow.js', route => route.fulfill({ body, contentType: 'text/javascript' }));
-        // Cached steady HTML has a header-Rename control absent in today's shell.
-        const html = await (await page.request.get(page.url())).text();
-        await page.route('**/?controller=steady', route => route.fulfill({ contentType: 'text/html',
-            body: html.replace('</body>', '<button id="rename-current" hidden>Rename</button></body>') }));
-    }
+    const variant = 'follow';
     const row = id => page.locator(`.session-row[data-session-id="${id}"]`);
     const ready = () => page.waitForFunction(() => !document.querySelector('#send-btn').disabled);
     const select = async id => { await row(id).locator('.session-link').click(); await ready(); };
@@ -150,10 +141,6 @@ async page => {
     }), 'Offscreen checks escaped the existing visibility lifecycle');
     check(posts === 3, `Unexpected POST count: ${posts}; only three explicit Sends were made`);
     page.off('request', countPost);
-    if (variant === 'steady') {
-        await page.unroute('**/follow.js');
-        await page.unroute('**/?controller=steady');
-    }
     return { passed: true, controller: variant, browserPosts: posts, providers: 0,
         cases: ['saved offscreen reply clears stuck POST', 'no selected draft/history/focus mutation', 'late transport failure preserves newer Send',
             'unadmitted POST is not working', 'missing Send remains uncertain', 'cancelled/dismissed receipt stays dismissed',

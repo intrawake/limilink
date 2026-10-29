@@ -1,19 +1,15 @@
 // Disposable tool/sidebar_preview.py --fake-chat --history-size 2000 only.
-// ?controller=steady also exercises cached HTML without the new helper tags.
 async page => {
     const base = 'http://127.0.0.1:11012';
     if (!page.url().startsWith(base + '/')) throw Error('Use the isolated fixture.');
     const check = (value, message) => { if (!value) throw Error(message); };
-    const variant = await page.evaluate(() => new URL(location.href).searchParams.get('controller') || 'follow');
-    if (variant === 'steady') {
-        const body = await (await page.request.get(base + '/steady.js')).text();
-        await page.route('**/follow.js', route => route.fulfill({ body, contentType: 'text/javascript' }));
-        const html = (await (await page.request.get(page.url())).text())
-            .replace('    <script src="/history-view.js?v=3" defer></script>\n', '')
-            .replace('    <script src="/reply-state.js?v=1" defer></script>\n', '')
-            .replace('</body>', '<button id="rename-current" hidden>Rename</button></body>');
-        await page.route('**/?controller=steady', route => route.fulfill({ body: html, contentType: 'text/html' }));
-    }
+    const variant = 'follow';
+    // Exercise helper bootstrap when cached HTML lacks the helper tags.
+    const entry = page.url();
+    const html = (await (await page.request.get(entry)).text())
+        .replace('    <script src="/history-view.js?v=3" defer></script>\n', '')
+        .replace('    <script src="/reply-state.js?v=1" defer></script>\n', '');
+    await page.route(entry, route => route.fulfill({ body: html, contentType: 'text/html' }));
     const row = id => page.locator(`.session-row[data-session-id="${id}"]`);
     const input = page.locator('#message-input');
     const ready = () => page.waitForFunction(() => !document.querySelector('#send-btn').disabled);
@@ -50,12 +46,6 @@ async page => {
         await external('session_c', first);
         await page.waitForFunction(text => document.querySelector('#chat-container').textContent.includes('Fixture reply: ' + text), first);
         await frames();
-        // The cached controller predates layout-driven bottom following. Explicitly
-        // expose the reply rather than weakening the read-at-bottom requirement.
-        if (variant === 'steady') {
-            await page.locator('#chat-container').evaluate(node => { node.scrollTop = node.scrollHeight; });
-            await page.waitForFunction(() => !replies.isUnread('session_c'));
-        }
         check(await page.locator('.message[data-kept="yes"]').count() === 1, 'Canonical append replaced old nodes');
         check(await page.locator('.message').count() === 52, 'Append did not add exactly two canonical messages');
         check(await row('session_c').locator('.session-unread').count() === 0, 'Displayed bottom reply stayed unread');
@@ -158,7 +148,6 @@ async page => {
         await page.waitForFunction(() => replies.isUnread('session_c'));
         check(await row('session_c').locator('.session-unread').isVisible(), 'Covered conversation falsely acknowledged reply');
         await page.locator('#sidebar-close').click();
-        if (variant === 'steady') await page.locator('#chat-container').evaluate(node => { node.scrollTop = node.scrollHeight; });
         await page.waitForFunction(() => !replies.isUnread('session_c'));
         check(await input.inputValue() === 'Keep this draft', 'Unread tracking lost the draft');
 
@@ -191,5 +180,5 @@ async page => {
             helperEmptyRestore: !!globalThis.LimilinkHistory?.create.toString().includes('!next.length && !transients.length'),
         })).catch(() => ({}));
         throw Error(stage + ': ' + error.message + '; ' + JSON.stringify(state));
-    }
+    } finally { await page.unroute(entry); }
 }

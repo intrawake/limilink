@@ -3,17 +3,8 @@ async page => {
     const base = 'http://127.0.0.1:11012';
     if (!page.url().startsWith(base + '/')) throw Error('Use the isolated fixture.');
     const check = (value, message) => { if (!value) throw Error(message); };
-    const variant = await page.evaluate(() => new URL(location.href).searchParams.get('controller') || 'follow');
+    const variant = 'follow';
     const originalViewport = page.viewportSize();
-    if (variant === 'steady') {
-        const script = await (await page.request.get(base + '/steady.js')).text();
-        const css = await (await page.request.get(base + '/drawer.css')).text();
-        await page.route('**/follow.js', route => route.fulfill({ body: script, contentType: 'text/javascript' }));
-        await page.route('**/arrange.css', route => route.fulfill({ body: css, contentType: 'text/css' }));
-        const html = (await (await page.request.get(page.url())).text())
-            .replace('</body>', '<button id="rename-current" hidden>Rename</button></body>');
-        await page.route('**/?controller=steady', route => route.fulfill({ body: html, contentType: 'text/html' }));
-    }
     const writes = [];
     const onRequest = request => { if (!['GET', 'HEAD'].includes(request.method())) writes.push(request.method()); };
     page.on('request', onRequest);
@@ -90,11 +81,6 @@ async page => {
         page.off('request', onRequest);
         await page.emulateMedia({ reducedMotion: null });
         if (originalViewport) await page.setViewportSize(originalViewport);
-        if (variant === 'steady') {
-            await page.unroute('**/follow.js');
-            await page.unroute('**/arrange.css');
-            await page.unroute('**/?controller=steady');
-        }
         await page.reload();
     }
 }
