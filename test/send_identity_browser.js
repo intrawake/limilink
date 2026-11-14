@@ -1,111 +1,96 @@
-// Requires tool/sidebar_preview.py --fake-chat. No model/provider requests.
+// Actual service integration gate for the disposable --fake-chat fixture only.
+// Unlike contract-fake browser tests, this requires the backend operation owner.
 async page => {
-    if (!page.url().startsWith('http://127.0.0.1:11012/')) throw new Error('Use the isolated fixture server.');
     const base = 'http://127.0.0.1:11012';
-    const run = await page.evaluate(() => Date.now().toString(36));
-    const text = `Replay-safe Send ${run}`;
-    const check = (value, message) => { if (!value) throw new Error(message); };
-    await page.bringToFront();
-    await page.reload();
-    await page.waitForSelector('.session-row');
-    await page.locator('.session-row[data-session-id="session_a"] .session-link').click();
-    await page.waitForFunction(() => !document.querySelector('#send-btn').disabled);
-    const browserBodies = [];
-    await page.evaluate(() => {
-        window.humanSendCount = 0;
-        document.addEventListener('limilink:human-send', () => window.humanSendCount++);
+    if (!page.url().startsWith(base + '/')) throw Error('Use the isolated fixture server.');
+    const check = (value, message) => { if (!value) throw Error(message); };
+    const text = 'Replay-safe operation ' + Date.now().toString(36);
+    const posts = [];
+    let route, response, seen, done;
+    const captured = new Promise(resolve => { seen = resolve; });
+    const accepted = new Promise(resolve => { done = resolve; });
+    const path = '/sessions/session_a/operations';
+    await page.route('**' + path, async requestRoute => {
+        if (requestRoute.request().method() !== 'POST') { await requestRoute.continue(); return; }
+        posts.push(requestRoute.request().postDataJSON());
+        if (posts.length === 1) {
+            route = requestRoute; seen(); response = await route.fetch(); done();
+        } else await requestRoute.continue();
     });
-    let firstRoute, firstResponse, captured, finished;
-    const seen = new Promise(resolve => { captured = resolve; });
-    const completed = new Promise(resolve => { finished = resolve; });
-    await page.route('**/chat', async route => {
-        browserBodies.push(route.request().postDataJSON());
-        if (browserBodies.length === 1) {
-            firstRoute = route;
-            captured();
-            firstResponse = await route.fetch();
-            finished(); // Browser response stays unresolved while server work is complete.
-        } else await route.continue();
-    });
-    await page.locator('#message-input').fill(text);
-    await page.locator('#send-btn').click();
-    await seen;
-    const original = browserBodies[0];
-    check(/^[0-9a-f]{32}$/.test(original.request_id), 'Send has no stable random ID');
-    const replay = page.request.post(`${base}/chat`, { data: original });
-    await page.evaluate(() => {
-        Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
-        document.dispatchEvent(new Event('visibilitychange'));
-    });
-    await completed;
-    const duplicateResponse = await replay;
-    check(duplicateResponse.ok(), 'Concurrent replay did not share the original result');
-    check(JSON.stringify(await duplicateResponse.json()) === JSON.stringify(await firstResponse.json()), 'Replayed response differs');
-    const later = await page.request.post(`${base}/chat`, { data: original });
-    check(later.ok(), 'Completed replay failed');
-    await page.evaluate(() => {
-        Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
-        document.dispatchEvent(new Event('visibilitychange'));
-        window.dispatchEvent(new Event('focus'));
-        window.dispatchEvent(new Event('pageshow'));
-        window.dispatchEvent(new Event('online'));
-    });
-    await page.waitForFunction(message => document.querySelector('#chat-container').textContent.includes(`Fixture reply: ${message}`) && !document.querySelector('#send-btn').disabled, text);
-    check(browserBodies.length === 1, 'Returning to the page automatically posted again');
-    check(await page.evaluate(() => window.humanSendCount) === 1, 'Receipt replay/recovery advanced the human boundary');
-    let saved = await (await page.request.get(`${base}/sessions/session_a/history`)).json();
-    check(saved.history.filter(item => item.role === 'user' && item.content === text).length === 1, 'One ID created duplicate saved user entries');
-    check(saved.history.filter(item => item.role === 'bot' && item.content === `Fixture reply: ${text}`).length === 1, 'One ID created duplicate saved replies');
-    await firstRoute.fulfill({ response: firstResponse });
-    await page.evaluate(() => new Promise(requestAnimationFrame));
-    await page.unroute('**/chat');
-
-    // A deliberate second Send of the same text remains a separate operation.
-    let secondId;
-    await page.route('**/chat', async route => {
-        secondId = route.request().postDataJSON().request_id;
-        await route.continue();
-    });
-    await page.locator('#message-input').fill(text);
-    await page.locator('#send-btn').click();
-    await page.waitForFunction(message => [...document.querySelectorAll('.message.bot')].filter(item => item.textContent === `Fixture reply: ${message}`).length === 2 && !document.querySelector('#send-btn').disabled, text);
-    check(secondId !== original.request_id && /^[0-9a-f]{32}$/.test(secondId), 'A new Send reused the old ID');
-    check(await page.evaluate(() => window.humanSendCount) === 2, 'Deliberate second Send did not advance exactly once');
-    saved = await (await page.request.get(`${base}/sessions/session_a/history`)).json();
-    check(saved.history.filter(item => item.role === 'user' && item.content === text).length === 2, 'Legitimate identical message was suppressed');
-    await page.unroute('**/chat');
-
-    // Test a genuinely non-secure HTTP origin, not localhost's secure exemption.
-    const context = await page.context().browser().newContext();
-    const origin = 'http://limilink-fixture.invalid';
-    let insecureId, insecurePosts = 0;
-    await context.route(`${origin}/**`, async route => {
-        const request = route.request();
-        if (request.method() === 'POST' && request.url() === `${origin}/chat`) {
-            insecurePosts++;
-            insecureId = request.postDataJSON().request_id;
+    try {
+        await page.setViewportSize({ width: 1280, height: 900 }); await page.bringToFront();
+        await page.evaluate(() => { localStorage.clear(); localStorage.setItem('limilink_last_session', 'session_a'); });
+        await page.reload(); await page.waitForFunction(() => currentSession === 'session_a' && historyReady);
+        await page.evaluate(() => {
+            window.humanSendCount=0;
+            document.addEventListener('limilink:human-send', () => humanSendCount++);
+        });
+        await page.locator('#message-input').fill(text); await page.locator('#send-btn').click(); await captured;
+        check(/^[0-9a-f]{32}$/.test(posts[0].request_id), 'No stable random identity');
+        const replay = await page.request.post(base + path, { data: posts[0] });
+        await accepted;
+        check(replay.ok() && response.ok(), 'Duplicate admission failed');
+        const original = (await response.json()).operation, duplicate = (await replay.json()).operation;
+        // Async state/revision may advance between responses; identity/sequence/payload may not.
+        check(original.id === duplicate.id && original.sequence === duplicate.sequence && original.message === duplicate.message, 'Replay allocated a new operation or changed payload');
+        await page.locator('#message-input').fill('Keep newer draft');
+        await page.evaluate(() => { window.dispatchEvent(new Event('focus')); window.dispatchEvent(new Event('pageshow')); window.dispatchEvent(new Event('online')); });
+        await route.abort('failed');
+        // waitForFunction does not await a Promise predicate in this harness.
+        // Await each status fetch explicitly rather than treating a Promise as true.
+        const deadline = Date.now() + 15000;
+        while (true) {
+            const data = await (await page.request.get(base + path + '/' + original.id)).json();
+            if (data.operation?.state === 'succeeded') break;
+            if (Date.now() >= deadline) throw Error('Timed out waiting for exact operation completion');
+            await page.waitForTimeout(25);
         }
-        const response = await route.fetch({ url: base + request.url().slice(origin.length) });
-        await route.fulfill({ response });
-    });
-    const phone = await context.newPage();
-    await phone.goto(origin + page.url().slice(base.length));
-    await phone.waitForFunction(() => !document.querySelector('#send-btn').disabled);
-    check(await phone.evaluate(() => isSecureContext) === false, 'Fixture origin accidentally has secure-context privileges');
-    await phone.locator('#message-input').fill(`Plain HTTP Send ${run}`);
-    await phone.locator('#send-btn').click();
-    // Send readiness now allows follow-ups; wait for this delivery explicitly.
-    await phone.waitForFunction(() => !pendingSends.has(currentSession) && !document.querySelector('#send-btn').disabled);
-    check(/^[0-9a-f]{32}$/.test(insecureId), 'Plain HTTP could not generate an ID');
-    check(insecurePosts === 1, 'Plain HTTP Send was duplicated');
-    await phone.evaluate(() => Object.defineProperty(crypto, 'getRandomValues', { configurable: true, value: () => { throw new Error('fixture random source unavailable'); } }));
-    await phone.locator('#message-input').fill('Keep this draft when ID generation fails');
-    await phone.locator('#send-btn').click();
-    check(await phone.locator('#message-input').inputValue() === 'Keep this draft when ID generation fails', 'ID generation failure lost the draft');
-    check(insecurePosts === 1, 'ID generation failure silently sent without an ID');
-    check((await phone.locator('#notice').textContent()).includes('could not safely identify'), 'ID generation failure was hidden');
-    await phone.evaluate(() => pauseUpdates());
-    await context.unrouteAll({ behavior: 'wait' });
-    await context.close();
-    console.log('PASS: one Send + resume produces one browser POST; concurrent/completed packet replay creates one saved user/reply; identical intentional Send gets a new ID; insecure HTTP and random-source failure are safe. No providers.');
+        await page.evaluate(async () => { await syncOperations(); await syncSnapshot({force:true,refreshView:true}); });
+        check(await page.locator('#message-input').inputValue() === 'Keep newer draft', 'Recovery overwrote draft');
+        const completedReplay = await page.request.post(base + path, { data: posts[0] });
+        check(completedReplay.ok() && (await completedReplay.json()).operation.id === original.id, 'Completed replay lost identity');
+        const conflict = await page.request.post(base + path, { data: { ...posts[0], message: text + ' conflict' } });
+        check(conflict.status() === 409, 'Conflicting payload reuse was accepted');
+        let history = await (await page.request.get(base + '/sessions/session_a/history')).json();
+        check(history.history.filter(item => item.role === 'user' && item.content === text).length === 1, 'One identity duplicated saved user entries');
+        check(history.history.filter(item => item.role === 'bot' && item.content === 'Fixture reply: ' + text).length === 1, 'One identity duplicated saved replies');
+        check(posts.length === 1 && await page.evaluate(() => humanSendCount) === 1, 'Recovery automatically resent or emitted human boundary');
+        await page.locator('#message-input').fill(text); await page.locator('#send-btn').click();
+        await page.waitForFunction(message => [...document.querySelectorAll('.message.bot')].filter(node => node.textContent === 'Fixture reply: ' + message).length === 2, text);
+        check(posts.length === 2 && posts[0].request_id !== posts[1].request_id, 'Explicit same-text send reused identity');
+        check(await page.evaluate(() => humanSendCount) === 2, 'Explicit second send did not emit exactly once');
+        history = await (await page.request.get(base + '/sessions/session_a/history')).json();
+        check(history.history.filter(item => item.role === 'user' && item.content === text).length === 2, 'Same text incorrectly deduplicated');
+        // Secure-context-independent randomness and its refusal path.
+        await page.evaluate(() => Object.defineProperty(crypto, 'getRandomValues', { configurable: true, value: () => { throw Error('fixture random unavailable'); } }));
+        await page.locator('#message-input').fill('Keep draft on identity failure'); await page.locator('#send-btn').click();
+        check(await page.locator('#message-input').inputValue() === 'Keep draft on identity failure', 'Identity failure lost draft');
+        check(posts.length === 2 && (await page.locator('#notice').textContent()).includes('could not safely identify'), 'Identity failure posted or was silent');
+        // Exercise a truly insecure HTTP origin, not localhost's exemption.
+        const insecureContext = await page.context().browser().newContext();
+        const origin = 'http://limilink-fixture.invalid';
+        let insecureId, insecurePosts = 0;
+        try {
+            await insecureContext.route(origin + '/**', async proxy => {
+                const request = proxy.request();
+                if (request.method() === 'POST' && request.url().split('?')[0].endsWith('/operations')) {
+                    insecureId = request.postDataJSON().request_id; insecurePosts++;
+                }
+                const result = await proxy.fetch({ url: base + request.url().slice(origin.length) });
+                await proxy.fulfill({ response: result });
+            });
+            const phone = await insecureContext.newPage();
+            await phone.goto(origin + '/');
+            await phone.waitForFunction(() => currentSession && historyReady);
+            check(await phone.evaluate(() => isSecureContext) === false, 'Test origin is secure');
+            await phone.locator('#message-input').fill('Plain HTTP identity ' + text); await phone.locator('#send-btn').click();
+            await phone.waitForFunction(() => !pendingFor(currentSession).length && !trackedFor(currentSession).some(item => item.transport));
+            check(insecurePosts === 1 && /^[0-9a-f]{32}$/.test(insecureId), 'Plain HTTP failed to allocate/send one exact ID');
+            await phone.evaluate(() => pauseUpdates());
+        } finally { await insecureContext.close(); }
+        return { passed: true, browserPosts: 2, providers: 0, cases: ['same-ID concurrent/completed admission', 'conflict refusal', 'no transport-loss/recovery replay', 'one saved user/result per ID', 'same-text new intent', 'identity failure preserves draft', 'insecure HTTP randomness'] };
+    } finally {
+        try { await route?.abort('failed'); } catch {}
+        await page.unroute('**' + path);
+    }
 }

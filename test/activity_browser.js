@@ -35,7 +35,7 @@ async page => {
     };
     let calls = 0, posts = 0, revision = 'a1', missing = false;
     let hold = false, held = null, heldReady = null;
-    const countPosts = request => { if (request.method() === 'POST' && request.url().endsWith('/chat')) posts++; };
+    const countPosts = request => { if (request.method() === 'POST' && request.url().endsWith('/operations')) posts++; };
     page.on('request', countPosts);
     await page.route('**/sessions/*/activity*', async route => {
         calls++;

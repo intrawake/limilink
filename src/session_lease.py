@@ -8,10 +8,13 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
-def pi_lease_command(command: list[str], lease_fd: int) -> list[str]:
+def pi_lease_command(
+    command: list[str], lease_fd: int, fence_fd: int | None = None
+) -> list[str]:
     """Relocate the lease in a fresh exec-only helper, never in the server."""
     helper = Path(__file__).resolve().parent.parent / "tool" / "lease_exec.py"
-    return [sys.executable, "-I", "-S", str(helper), str(lease_fd), "--", *command]
+    descriptors = str(lease_fd) if fence_fd is None else f"{lease_fd},{fence_fd}"
+    return [sys.executable, "-I", "-S", str(helper), descriptors, "--", *command]
 
 
 class SessionLeaseBusy(RuntimeError):

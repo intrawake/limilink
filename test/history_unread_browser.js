@@ -121,7 +121,7 @@ async page => {
         const elsewhere = 'Unread offscreen ' + run;
         await external('session_a', elsewhere);
         await page.waitForFunction(() => replies.isUnread('session_a'));
-        check(!await page.evaluate(() => pendingSends.has('session_a')), 'External test accidentally used a local Send');
+        check(!await page.evaluate(() => pendingFor('session_a').length > 0), 'External test accidentally used a local Send');
         check(await row('session_a').locator('.session-unread').isVisible(), 'Offscreen reply not badged');
 
         // Reading this exact token in another tab clears it here, not every newer reply.
@@ -158,14 +158,14 @@ async page => {
         await page.locator('#new-session-btn').click();
         await page.waitForFunction(previous => currentSession && currentSession !== previous && historyReady, previousSession);
         await ready();
-        await page.route('**/chat', route => route.fulfill({ status: 500, json: { detail: 'Synthetic unadmitted failure' } }));
+        await page.route('**/sessions/*/operations', route => route.request().method() === 'POST' ? route.fulfill({ status: 429, json: { detail: 'Synthetic unadmitted failure' } }) : route.continue());
         await input.fill('Rejected before admission');
         await page.locator('#send-btn').click();
         await page.waitForFunction(() => document.querySelector('#chat-container .empty-conversation')
-            && !document.querySelector('#unconfirmed-send').hidden && !pendingSends.has(currentSession))
+            && !document.querySelector('#unconfirmed-send').hidden && !pendingFor(currentSession).length)
             .catch(error => { throw Error('Empty optimistic recovery: ' + error.message); });
         check(await page.locator('.message').count() === 0, 'Failed optimistic message remained canonical');
-        await page.unroute('**/chat');
+        await page.unroute('**/sessions/*/operations');
         return { controller: variant, initialNodes: initial, canonicalMessages: canonical.history.length,
             append: 'old nodes retained', prepend: 'anchor retained', unread: 'selected-away/offscreen/cross-tab/mobile-overlay',
             network: 'fixture only; no providers' };
@@ -176,7 +176,7 @@ async page => {
             gap: chat.scrollHeight - chat.clientHeight - chat.scrollTop,
             messages: chat.querySelectorAll('.message').length,
             canonical: historyCache.get(currentSession)?.history.length,
-            pending: pendingSends.size, saved: unconfirmedSends.get(currentSession)?.length || 0,
+            pending: pendingFor(currentSession).length, saved: trackedFor(currentSession).filter(recoverable).length,
             helperEmptyRestore: !!globalThis.LimilinkHistory?.create.toString().includes('!next.length && !transients.length'),
         })).catch(() => ({}));
         throw Error(stage + ': ' + error.message + '; ' + JSON.stringify(state));

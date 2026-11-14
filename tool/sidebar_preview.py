@@ -98,18 +98,18 @@ def main():
                             else "No active agent process found for this session."
                         )
                     else:
-                        async with main.get_session_lock(session_id):
-                            active = asyncio.Event()
-                            active_replies[session_id] = active
+                        # DeliveryOwner already serializes this fixture turn.
+                        active = asyncio.Event()
+                        active_replies[session_id] = active
+                        try:
                             try:
-                                try:
-                                    await asyncio.wait_for(active.wait(), timeout=3)
-                                    reply = "Fixture reply stopped."
-                                except TimeoutError:
-                                    reply = f"Fixture reply: {message}"
-                            finally:
-                                if active_replies.get(session_id) is active:
-                                    del active_replies[session_id]
+                                await asyncio.wait_for(active.wait(), timeout=3)
+                                reply = "Fixture reply stopped."
+                            except TimeoutError:
+                                reply = f"Fixture reply: {message}"
+                        finally:
+                            if active_replies.get(session_id) is active:
+                                del active_replies[session_id]
                     main.append_to_history(path, "bot", reply)
                     return reply
 

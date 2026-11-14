@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import os
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Callable
 
 from session_lease import pi_lease_command
 
@@ -93,6 +93,8 @@ async def compact_rpc(
     command: list[str],
     *,
     lease_fd: int,
+    fence_fd: int | None = None,
+    on_spawn: Callable | None = None,
     cwd: str,
     env: dict[str, str],
     instructions: str | None = None,
@@ -170,8 +172,8 @@ async def compact_rpc(
             )
             spawn = asyncio.create_task(
                 asyncio.create_subprocess_exec(
-                    *pi_lease_command(command, lease_fd),
-                    pass_fds=(lease_fd,),
+                    *pi_lease_command(command, lease_fd, fence_fd),
+                    pass_fds=(lease_fd,) if fence_fd is None else (lease_fd, fence_fd),
                     stdin=asyncio.subprocess.PIPE,
                     stdout=write_fd,
                     stderr=asyncio.subprocess.DEVNULL,
@@ -180,6 +182,8 @@ async def compact_rpc(
                 )
             )
             process = await asyncio.shield(spawn)
+            if on_spawn is not None:
+                on_spawn(process)
             os.close(write_fd)
             write_fd = None
             if process.stdin is None:

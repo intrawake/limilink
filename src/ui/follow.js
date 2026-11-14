@@ -11,12 +11,14 @@ const sendButton = byId('send-btn');
 const renameDialog = byId('rename-dialog');
 const mobile = window.matchMedia('(max-width: 720px)');
 const drafts = new Map();
-const pendingSends = new Map();
-const displaySends = new Map();
-const activePosts = new Map();
+const operations = new Map();
+const recoveryRequired = new Map();
+const recoveredOperations = new Map();
+let recoveryReview = null;
+let recoveryPending = false;
+const operationChecks = new Map();
+const operationQueryCursor = new Map();
 const historyCache = new Map();
-const unconfirmedSends = new Map();
-const savedReceiptCursor = new Map();
 const reconcileViews = new Set();
 let serverBusy = new Set();
 let sessions = [];
@@ -25,7 +27,6 @@ let navigationVersion = 0;
 let snapshotSequence = 0;
 let sendGeneration = 0;
 let activeSnapshot = null;
-let activeReceiptCheck = null;
 let activeReplyCheck = null;
 let replyCursor = 0;
 let replyReadFrame = null;
@@ -33,8 +34,7 @@ let replies = null;
 let historyView = null;
 let displayedReply = null;
 let replyTrackingAvailable = false;
-let sendIdentityAvailable = false;
-let backgroundReceiptCursor = 0;
+let backgroundOperationCursor = 0;
 let pollTimer = null;
 let connected = false;
 let checkingSnapshot = false;
@@ -51,41 +51,112 @@ let trashTimer = null;
 let nextTrashRefresh = 0;
 
 function isTrashed(id) { return sessions.some(session => session.id === id && session.delete_at !== undefined); }
+function isWorking(id) { return serverBusy.has(id) || trackedFor(id).some(item => !item.dismissed && item.state === 'running'); }
 
-const MAX_SESSION_SENDS = 16, MAX_TOTAL_SENDS = 128;
-function pendingFor(id) { return [...(pendingSends.get(id)?.values() || [])]; }
-function isPending(id, request) { return pendingSends.get(id)?.get(request.id) === request; }
-function addPending(id, request) {
-    let group = pendingSends.get(id);
-    if (!group) pendingSends.set(id, group = new Map());
+const MAX_SESSION_SENDS = 64, MAX_TOTAL_SENDS = 512;
+const OPERATION_STATES = new Set(['queued', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted_not_started', 'indeterminate']);
+const TERMINAL_STATES = new Set(['succeeded', 'failed', 'cancelled', 'interrupted_not_started']);
+const SAVED_OPERATION_PREFIX = 'limilink_operation_v1:';
+const DISMISSED_OPERATION_PREFIX = 'limilink_dismissed_operation_v1:';
+function savedOperationKey(sessionId, id) { return `${SAVED_OPERATION_PREFIX}${encodeURIComponent(sessionId)}:${id}`; }
+function dismissedOperationKey(sessionId, id) { return `${DISMISSED_OPERATION_PREFIX}${encodeURIComponent(sessionId)}:${id}`; }
+let storageWarning = '';
+let savedRecordsReadable = true;
+function trackedFor(id) { return [...(operations.get(id)?.values() || [])]; }
+function ownOperation(id, request) {
+    let group = operations.get(id);
+    if (!group) operations.set(id, group = new Map());
     group.set(request.id, request);
 }
-function removePending(id, request) {
-    const group = pendingSends.get(id);
-    if (group?.get(request.id) !== request) return;
-    group.delete(request.id);
-    if (!group.size) pendingSends.delete(id);
-}
-function trackedFor(id) {
-    const records = new Map([...(displaySends.get(id)?.values() || [])].map(item => [item.id, item]));
-    for (const item of pendingFor(id)) records.set(item.id, item);
-    for (const item of unconfirmedSends.get(id) || []) records.set(item.id, item);
-    for (const post of activePosts.values()) if (post.sessionId === id) records.set(post.request.id, post.request);
-    return [...records.values()];
-}
-function isTracked(id, request) {
-    return isPending(id, request) || (unconfirmedSends.get(id) || []).includes(request);
-}
-function hasReceipts(id) {
-    return pendingSends.has(id) || (unconfirmedSends.get(id) || []).some(item => !item.failed);
-}
+function isTracked(id, request) { return operations.get(id)?.get(request.id) === request; }
+function pendingFor(id) { return trackedFor(id).filter(item => !item.dismissed && ['staged', 'sending', 'queued', 'running'].includes(item.state)); }
+function recoverable(request) { return !request.dismissed && ['unknown', 'unsent', 'refused', 'failed', 'cancelled', 'interrupted_not_started', 'indeterminate'].includes(request.state); }
+function hasUnresolvedOperations(id) { return trackedFor(id).some(item => !item.dismissed && ['sending', 'queued', 'running', 'unknown', 'indeterminate'].includes(item.state)); }
 function hasSendCapacity(id, text) {
-    // One extra control slot keeps !stop available when ordinary slots are full.
     const extra = text.trim() === '!stop' ? 1 : 0;
-    let total = 0;
-    const keys = new Set([...pendingSends.keys(), ...unconfirmedSends.keys(), ...displaySends.keys(), ...[...activePosts.values()].map(item => item.sessionId)]);
-    for (const key of keys) total += trackedFor(key).length;
-    return trackedFor(id).length < MAX_SESSION_SENDS + extra && total < MAX_TOTAL_SENDS + extra;
+    const retained = key => trackedFor(key).filter(item => !item.dismissed && (recoverable(item) || !TERMINAL_STATES.has(item.state))).length;
+    return retained(id) < MAX_SESSION_SENDS + extra
+        && [...operations.keys()].reduce((count, key) => count + retained(key), 0) < MAX_TOTAL_SENDS + extra;
+}
+
+function markDismissed(request) {
+    request.dismissed = true;
+    request.display = false;
+    delete request.text;
+    delete request.outcome;
+    delete request.detail;
+    request.transport?.abort();
+}
+
+function savedDismissal(sessionId, id) {
+    try { return localStorage.getItem(dismissedOperationKey(sessionId, id)) !== null; }
+    catch { return false; } // Existing storage warnings describe unavailable recovery.
+}
+
+function persistOperations() {
+    if (!savedRecordsReadable) return false;
+    try {
+        for (const [sessionId, group] of operations) for (const item of group.values()) {
+            const key = savedOperationKey(sessionId, item.id);
+            const dismissedKey = dismissedOperationKey(sessionId, item.id);
+            // A separate, write-once identity marker cannot be overwritten by
+            // another tab persisting an older full operation record.
+            if (item.dismissed || localStorage.getItem(dismissedKey) !== null) {
+                if (localStorage.getItem(dismissedKey) === null) {
+                    localStorage.setItem(dismissedKey, JSON.stringify({ sessionId, id: item.id }));
+                }
+                markDismissed(item);
+                localStorage.removeItem(key);
+            } else if (recoverable(item) || !TERMINAL_STATES.has(item.state)) {
+                const { transport, ...record } = item;
+                localStorage.setItem(key, JSON.stringify({ ...record, sessionId }));
+            } else localStorage.removeItem(key);
+        }
+        return true;
+    } catch {
+        storageWarning = 'Browser storage is unavailable. Save a copy of your message before leaving; reload recovery is unavailable.';
+        notice(storageWarning);
+        return false;
+    }
+}
+
+function restoreOperations() {
+    try {
+        const records = [], dismissals = [];
+        // Each identity owns its storage entry: another tab cannot replace a
+        // whole-map journal and silently erase this tab's uncertain attempt.
+        for (let index = 0; index < localStorage.length; index++) {
+            const key = localStorage.key(index);
+            const dismissed = key?.startsWith(DISMISSED_OPERATION_PREFIX);
+            if (!dismissed && !key?.startsWith(SAVED_OPERATION_PREFIX)) continue;
+            const item = JSON.parse(localStorage.getItem(key));
+            const identityKey = dismissed ? dismissedOperationKey : savedOperationKey;
+            if (!item || typeof item.sessionId !== 'string' || !/^[0-9a-f]{32}$/.test(item.id)
+                || identityKey(item.sessionId, item.id) !== key) throw Error('Invalid saved identity');
+            (dismissed ? dismissals : records).push(item);
+        }
+        for (const item of records) {
+            if (!item || typeof item.sessionId !== 'string' || !/^[0-9a-f]{32}$/.test(item.id)
+                || typeof item.text !== 'string' || ![...OPERATION_STATES, 'staged', 'sending', 'unknown', 'unsent', 'refused'].includes(item.state)
+                || !Number.isInteger(item.revision) || item.revision < -1 || typeof item.attempted !== 'boolean') throw Error('Invalid saved operation');
+        }
+        for (const item of records) {
+            if (item.state === 'staged') item.state = 'unsent';
+            if (item.state === 'sending') item.state = 'unknown';
+            item.transport = null;
+            ownOperation(item.sessionId, item);
+        }
+        // Dismissal always wins, regardless of storage enumeration order or a
+        // stale tab's full record. Only its identity belongs in the owner.
+        for (const { sessionId, id } of dismissals) {
+            ownOperation(sessionId, { id, dismissed: true, display: false });
+            localStorage.removeItem(savedOperationKey(sessionId, id));
+        }
+    } catch {
+        savedRecordsReadable = false;
+        storageWarning = 'Browser storage is unavailable or saved delivery records could not be read. Check the conversation before resending; no messages were automatically sent.';
+        notice(storageWarning);
+    }
 }
 
 
@@ -125,22 +196,6 @@ function sessionTitle(id) {
     return sessions.find(session => session.id === id)?.title || id || 'Limilink';
 }
 
-function addDisplay(id, request) {
-    let group = displaySends.get(id);
-    if (!group) displaySends.set(id, group = new Map());
-    group.set(request.id, request);
-}
-function removeDisplay(id, request) {
-    const group = displaySends.get(id);
-    if (group?.get(request.id) !== request) return;
-    group.delete(request.id);
-    if (!group.size) displaySends.delete(id);
-}
-function hasTransportCapacity(text) {
-    const stop = text.trim() === '!stop';
-    return [...activePosts.values()].filter(item => (item.request.text.trim() === '!stop') === stop).length < (stop ? 1 : 2);
-}
-
 function updateHeading() {
     byId('session-title').textContent = sessionTitle(currentSession);
     byId('session-title').classList.toggle('trashed', isTrashed(currentSession));
@@ -149,15 +204,18 @@ function updateHeading() {
 }
 
 function updateInputState() {
+    showRecovery();
     input.disabled = !currentSession;
     const pending = pendingFor(currentSession);
-    const busy = serverBusy.has(currentSession);
-    // Cached reads are not admission authority. Keep the action available and
-    // report any genuine local resource limit when the human actually sends.
+    const busy = isWorking(currentSession);
+    // Snapshot readiness and long-running executions never gate admission.
     sendButton.disabled = false;
     sendButton.title = '';
-    byId('typing').hidden = !connected || (!busy && !pending.length);
-    byId('typing').textContent = busy ? 'Thinking…' : pending.some(item => item.accepted) ? 'Waiting for reply…' : 'Sending…';
+    const status = deliveryStatus(currentSession);
+    byId('typing').hidden = !status && !busy;
+    byId('typing').textContent = pending.some(item => ['staged', 'sending'].includes(item.state)) ? 'Sending…'
+        : ['Acceptance unknown', 'Effects unknown'].includes(status) ? status : busy ? 'Thinking…' : status;
+
 }
 
 function setSidebarBusy(value) {
@@ -208,12 +266,15 @@ function actionButton(text, action, session, disabled = false) {
 }
 
 function deliveryStatus(id) {
-    const pending = pendingFor(id);
-    const saved = unconfirmedSends.get(id) || [];
-    if (saved.some(item => !item.failed)) return 'Unconfirmed';
-    if (pending.length > 1) return `Pending ${pending.length}`;
-    if (pending.length && !serverBusy.has(id)) return pending[0].accepted ? 'Pending' : pending[0].needsRecovery ? 'Confirming…' : 'Sending…';
-    return saved.length ? 'Send failed' : '';
+    const records = trackedFor(id).filter(item => !item.dismissed);
+    if (records.some(item => item.state === 'indeterminate')) return 'Effects unknown';
+    if (records.some(item => item.state === 'unknown')) return 'Acceptance unknown';
+    if (records.some(item => ['staged', 'sending'].includes(item.state))) return 'Sending…';
+    if (records.some(item => item.state === 'running')) return 'Running';
+    if (records.some(item => item.state === 'queued')) return 'Queued';
+    if (records.some(item => item.state === 'unsent')) return 'Not sent';
+    if (records.some(recoverable)) return 'Send failed';
+    return '';
 }
 
 function renderSessions() {
@@ -230,7 +291,7 @@ function renderSessions() {
         row.className = 'session-row status-slotted';
         row.dataset.sessionId = session.id;
         row.classList.toggle('selected', session.id === currentSession);
-        row.classList.toggle('busy', serverBusy.has(session.id));
+        row.classList.toggle('busy', isWorking(session.id));
         row.classList.toggle('unread', !!replies?.isUnread(session.id));
         row.classList.toggle('trashed', isTrashed(session.id));
         const handle = document.createElement('button');
@@ -277,7 +338,7 @@ function renderSessions() {
             node.setAttribute('aria-label', label);
             status.append(node);
         };
-        if (serverBusy.has(session.id)) badge('⏳', 'session-working', 'Working');
+        if (isWorking(session.id)) badge('⏳', 'session-working', 'Working');
         if (replies?.isUnread(session.id)) badge('New', 'session-unread', 'Unread reply');
         const delivery = deliveryStatus(session.id);
         if (delivery) badge(delivery, 'session-delivery', delivery);
@@ -691,9 +752,9 @@ function connectionStatus(message = '') {
 
 function recoverableForView() {
     const records = [];
-    for (const [id, saved] of unconfirmedSends) {
+    for (const [id] of operations) {
         if (id === currentSession || !sessions.some(item => item.id === id)) {
-            for (const request of saved) records.push({ sessionId: id, request });
+            for (const request of trackedFor(id).filter(recoverable)) records.push({ sessionId: id, request });
         }
     }
     return records;
@@ -701,123 +762,208 @@ function recoverableForView() {
 
 function recoverMissingSessions() {
     const known = new Set(sessions.map(item => item.id));
-    const keys = new Set([...pendingSends.keys(), ...displaySends.keys(), ...[...activePosts.values()].map(item => item.sessionId)]);
-    for (const id of keys) {
+    for (const [id] of operations) {
         if (known.has(id)) continue;
         for (const request of trackedFor(id)) {
-            removePending(id, request);
-            removeDisplay(id, request);
-            if (request.dismissed) request.transport?.abort();
-            else if (!request.settled) preserveUnconfirmed(id, request);
+            request.display = false;
+            if (request.dismissed || request.state === 'succeeded') {
+                if (!request.transport) operations.get(id).delete(request.id);
+                continue;
+            }
+            if (TERMINAL_STATES.has(request.state)) continue;
+            request.state = request.attempted ? 'unknown' : 'unsent';
+            request.transport?.abort();
         }
     }
+    persistOperations();
     showUnconfirmed();
 }
 
 function dismissRecoverable(records) {
     for (const { sessionId: id, request } of records) {
-        if (!(unconfirmedSends.get(id) || []).includes(request)) continue;
-        request.dismissed = true;
-        removeDisplay(id, request);
-        forgetSavedSend(id, request);
-        // Explicit human recovery/dismissal may release an inaccessible old
-        // transport. It neither replays a POST nor signals a backend process.
-        if (!sessions.some(item => item.id === id)) request.transport?.abort();
+        if (!isTracked(id, request) || !recoverable(request)) continue;
+        markDismissed(request);
+    }
+    if (!persistOperations()) {
+        storageWarning = 'Browser storage is unavailable. Dismissal could not be saved; discarded messages may reappear after reload.';
+        notice(storageWarning);
     }
 }
 
 function showUnconfirmed() {
+    showRecovery();
     const records = recoverableForView();
     const removed = records.some(item => item.sessionId !== currentSession);
     byId('unconfirmed-send').hidden = !records.length;
     byId('saved-send-status').textContent = removed
         ? 'Messages from removed conversations are saved below. Restoring copies them into this conversation’s draft.'
-        : records.some(item => !item.request.failed)
-            ? 'Delivery couldn’t be confirmed. Check the conversation before resending.'
-            : 'The send failed. Your message is saved below.';
+        : records.some(item => ['unknown', 'indeterminate'].includes(item.request.state))
+            ? 'Acceptance or effects are unknown. Check the conversation before resending; effects may already have happened. Later staged messages were not sent.'
+            : records.some(item => item.request.state === 'unsent')
+                ? 'Not sent. Your staged message is saved below; restore it as a draft to send explicitly.'
+                : 'The send failed or was not accepted. Your message is saved below.';
+    const details = records.map(({ request }) => request.detail || request.outcome?.body?.detail).filter(Boolean);
+    if (details.length) byId('saved-send-status').textContent += ` ${details.join(' · ')}`;
     byId('unconfirmed-text').textContent = records.map(({ sessionId, request }) =>
         sessionId === currentSession ? request.text : `Removed conversation ${sessionId}:\n${request.text}`).join('\n\n---\n\n');
     byId('restore-unconfirmed').disabled = !currentSession;
     byId('restore-unconfirmed').textContent = removed ? 'Restore here as draft' : 'Restore as draft';
 }
 
-function preserveUnconfirmed(id, request) {
-    const saved = unconfirmedSends.get(id) || [];
-    if (!saved.includes(request)) saved.push(request);
-    unconfirmedSends.set(id, saved);
-    showUnconfirmed();
+function showRecovery() {
+    const required = recoveryRequired.get(currentSession);
+    byId('session-recovery').hidden = !required;
+    const review = recoveryReview?.id === currentSession && recoveryReview.navigation === navigationVersion ? recoveryReview : null;
+    byId('recovery-status').textContent = review?.message || (required === 'unavailable'
+        ? 'Operation status is unavailable. Review recovery to check this session; no work will be retried.'
+        : 'This session is paused. Review uncertain work before allowing new messages.');
+    byId('review-recovery').disabled = recoveryPending;
+    byId('recovery-consent').hidden = !review?.token;
+    byId('confirm-recovery').hidden = !review?.token;
+    byId('confirm-recovery').disabled = recoveryPending || !byId('acknowledge-recovery').checked;
 }
 
-function forgetSavedSend(id, request) {
-    const saved = (unconfirmedSends.get(id) || []).filter(item => item !== request);
-    if (saved.length) unconfirmedSends.set(id, saved);
-    else unconfirmedSends.delete(id);
-    showUnconfirmed();
+async function recoveryCall(id, options = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try { return await api(`/sessions/${encodeURIComponent(id)}/recovery`, { ...options, signal: controller.signal }); }
+    finally { clearTimeout(timeout); }
 }
 
-function receiptCandidate(id) {
-    const records = [...pendingFor(id), ...(unconfirmedSends.get(id) || []).filter(item => !item.failed)];
-    const unique = [...new Map(records.map(item => [item.id, item])).values()];
-    const cursor = savedReceiptCursor.get(id) || 0;
-    savedReceiptCursor.set(id, (cursor + 1) % Math.max(1, unique.length));
-    return { tracked: unique[cursor % unique.length] };
+async function reviewRecovery() {
+    if (!currentSession || recoveryPending) return;
+    const review = { id: currentSession, navigation: navigationVersion, message: 'Checking writer ownership and recovery evidence…' };
+    recoveryReview = review; recoveryPending = true;
+    byId('acknowledge-recovery').checked = false;
+    showRecovery();
+    try {
+        const data = await recoveryCall(review.id);
+        if (recoveryReview !== review || currentSession !== review.id || navigationVersion !== review.navigation) return;
+        if (typeof data.recovery_required !== 'boolean') throw Error('Incomplete recovery state.');
+        recoveryRequired.set(review.id, data.recovery_required);
+        if (!data.recovery_required) { notice('Session accepts new messages. Past uncertain effects remain unknown; nothing was retried.'); return; }
+        if (!/^[0-9a-f]{64}$/.test(data.token) || !Array.isArray(data.uncertain_ids) || !data.configuration) throw Error('Incomplete recovery review.');
+        review.token = data.token;
+        review.requestId = newSendId();
+        review.message = `${data.warning} Agent: ${data.configuration.agent}; model: ${data.configuration.model}; reasoning: ${data.configuration.reasoning_effort || 'default'}. Uncertain operation IDs: ${data.uncertain_ids.join(', ') || 'none recorded'}. Check the conversation and any external effects before confirming.`;
+    } catch (error) {
+        if (recoveryReview === review) { review.token = null; review.message = `Recovery unavailable: ${error.message}`; }
+    } finally { recoveryPending = false; showRecovery(); }
 }
 
-function settleSend(id, request, outcome) {
-    if (!isTracked(id, request) || request.settled) return false;
-    request.settled = true;
-    removePending(id, request);
-    if (outcome.status === 200) forgetSavedSend(id, request);
-    else { removeDisplay(id, request); saveFailedSend(id, request, outcome.body.detail); }
-    reconcileViews.add(id);
-    // Exact terminal evidence releases a held transport; never retry its POST.
-    request.transport?.abort();
-    return true;
+async function confirmRecovery() {
+    const review = recoveryReview;
+    if (recoveryPending || !review?.token || !byId('acknowledge-recovery').checked
+        || review.id !== currentSession || review.navigation !== navigationVersion) return;
+    recoveryPending = true;
+    // Consume this local review BEFORE transport. Lost responses require a new
+    // explicit review, never an automatic POST retry or staged-message release.
+    const body = { request_id: review.requestId, token: review.token, acknowledge_possible_effects: true };
+    review.token = null;
+    showRecovery();
+    try {
+        const data = await recoveryCall(review.id, jsonRequest('POST', body));
+        if (recoveryReview !== review || currentSession !== review.id || navigationVersion !== review.navigation) return;
+        if (typeof data.recovery_required !== 'boolean' || data.confirmation?.acknowledged !== true) throw Error('Incomplete recovery confirmation.');
+        recoveryRequired.set(review.id, data.recovery_required);
+        notice(data.recovery_required ? 'Acknowledgement recorded, but this session is still paused. Review again.'
+            : 'Session accepts new messages. Past effects remain unknown. Interrupted messages were not resent.');
+        updateInputState();
+        if (!data.recovery_required) await syncOperations(review.id); // Observe coverage, never pump/resend.
+    } catch (error) {
+        if (recoveryReview === review) review.message = `Recovery was not confirmed: ${error.message}. Review again before continuing. Nothing will be resent automatically.`;
+    } finally { recoveryPending = false; byId('acknowledge-recovery').checked = false; showRecovery(); }
 }
 
-function reconcileReceipt(id, { tracked }, data, recover = false) {
-    if (!tracked || !isTracked(id, tracked) || tracked.settled) return false;
-    const receipt = data.send?.id === tracked.id ? data.send : null;
-    if (receipt?.state === 'complete' && (!Number.isInteger(receipt.outcome?.status)
-        || !receipt.outcome?.body || (receipt.outcome.status === 200
-            ? typeof receipt.outcome.body.reply !== 'string'
-            : receipt.outcome.status < 400 || receipt.outcome.status > 599 || !('detail' in receipt.outcome.body)))) {
-        throw new Error('The server returned an incomplete Send receipt.');
+function readRecoveryAcknowledgements(id, data) {
+    const acknowledged = Array.isArray(data.recovery_acknowledged) ? data.recovery_acknowledged : [];
+    for (const op of data.operations) if (op.state === 'indeterminate') {
+        const key = `${id}:${op.id}`;
+        if (acknowledged.some(item => item.id === op.id && item.revision === op.revision)) recoveredOperations.set(key, op.revision);
+        else recoveredOperations.delete(key);
     }
-    if (receipt?.state === 'complete') return settleSend(id, tracked, receipt.outcome);
-    if (receipt?.state === 'running') {
-        const changed = !tracked.accepted || !isPending(id, tracked);
-        tracked.accepted = true;
-        tracked.needsRecovery = true;
-        forgetSavedSend(id, tracked);
-        addPending(id, tracked);
+    // This metadata permits only a NEW explicit click; it never pumps staged work.
+}
+
+function blocksAdmission(id, item) {
+    return item.state === 'unknown' || (item.state === 'indeterminate'
+        && recoveredOperations.get(`${id}:${item.id}`) !== item.revision);
+}
+
+function holdSuccessors(id) {
+    for (const item of trackedFor(id)) if (item.state === 'staged' && item.text.trim() !== '!stop') {
+        item.state = 'unsent';
+        item.display = false;
+    }
+}
+
+function markUnknown(id, request) {
+    if (!isTracked(id, request) || request.dismissed || request.revision >= 0) return;
+    request.state = 'unknown';
+    holdSuccessors(id);
+    persistOperations();
+    showUnconfirmed();
+}
+
+function validateOperation(id, op) {
+    if (!op || op.session_id !== id || !/^[0-9a-f]{32}$/.test(op.id)
+        || !Number.isInteger(op.sequence) || op.sequence < 0 || !Number.isInteger(op.revision) || op.revision < 0
+        || !OPERATION_STATES.has(op.state) || typeof op.message !== 'string'
+        || !(op.execution_id === null || typeof op.execution_id === 'string')) throw Error('Incomplete operation state.');
+    const outcome = op.outcome;
+    if (outcome !== null && (!Number.isInteger(outcome?.status) || outcome.status < 100 || outcome.status > 599
+        || !outcome.body || !(typeof outcome.body.reply === 'string' || typeof outcome.body.detail === 'string'))) {
+        throw Error('Incomplete operation outcome.');
+    }
+    if (op.state === 'succeeded' && (outcome?.status !== 200 || typeof outcome.body.reply !== 'string')
+        || op.state === 'failed' && (!(outcome?.status >= 400) || typeof outcome.body.detail !== 'string')) {
+        throw Error('Incomplete operation outcome.');
+    }
+}
+
+function applyOperation(id, op) {
+    validateOperation(id, op);
+    let item = operations.get(id)?.get(op.id);
+    if (savedDismissal(id, op.id)) {
+        if (!item) ownOperation(id, item = { id: op.id });
+        const changed = !item.dismissed;
+        markDismissed(item);
+        showUnconfirmed();
         return changed;
     }
-    if (isPending(id, tracked) && (recover || tracked.needsRecovery || receipt?.state === 'indeterminate')) {
-        removePending(id, tracked);
-        preserveUnconfirmed(id, tracked);
-        return true;
+    if (item?.dismissed || (item && (op.message !== item.text || op.revision <= item.revision))) return false;
+    if (!item) {
+        item = { id: op.id, text: op.message, display: false, revision: -1, attempted: true };
+        ownOperation(id, item);
     }
-    return false;
-}
-
-function saveFailedSend(id, request, detail) {
-    request.failed = true;
-    preserveUnconfirmed(id, request);
-    notice(`Message in “${sessionTitle(id)}” failed: ${typeof detail === 'string' ? detail : 'The request failed.'}`);
+    item.revision = op.revision;
+    item.sequence = op.sequence;
+    item.state = op.state;
+    item.execution_id = op.execution_id;
+    item.outcome = op.outcome;
+    item.attempted = true;
+    if (recoverable(item)) {
+        item.display = false;
+        if (op.state === 'indeterminate') holdSuccessors(id);
+    }
+    reconcileViews.add(id);
+    // Exact GET acceptance can settle an otherwise lost admission response.
+    // Aborting this browser exchange never cancels the server-owned operation.
+    item.transport?.abort();
+    persistOperations();
+    showUnconfirmed();
+    return true;
 }
 
 function renderHistory(history, followBottom = isScrolledToBottom, finishedBefore = new Set()) {
     const scrollTop = chat.scrollTop;
     const recorded = globalThis.LimilinkHistory.canonicalSendIds(history);
-    for (const item of [...(displaySends.get(currentSession)?.values() || [])]) {
-        // A fresh snapshot after completion is authoritative even after a history rewrite.
-        if (recorded.has(item.id) || (item.settled && finishedBefore.has(item.id))) removeDisplay(currentSession, item);
+    for (const item of trackedFor(currentSession)) {
+        // Completion alone is not canonical history coverage. A subsequent
+        // snapshot or exact user ID retires only this optimistic identity.
+        if (recorded.has(item.id) || (TERMINAL_STATES.has(item.state) && finishedBefore.has(item.id))) item.display = false;
     }
-    const optimistic = [...(displaySends.get(currentSession)?.values() || [])].filter(item => !item.failed);
-    // Before capability discovery (or on an older server), absent canonical
-    // IDs cannot prove coverage. Keep each local identity until exact evidence
-    // or a fresh post-completion snapshot retires it.
+    const optimistic = trackedFor(currentSession).filter(item => item.display && !item.dismissed && !recoverable(item));
     historyView.render(history, optimistic);
     if (followBottom) pinChatToBottom();
     else {
@@ -846,10 +992,7 @@ async function syncSnapshot({ initial = false, recover = false, force = false, r
     const navigation = navigationVersion;
     const generation = sendGeneration;
     const sequence = snapshotSequence;
-    const candidate = receiptCandidate(id);
-    const finishedBefore = new Set([...(displaySends.get(id)?.values() || [])].filter(item => item.settled).map(item => item.id));
-    const { tracked } = candidate;
-    if (recover) for (const request of pendingFor(id)) request.needsRecovery = true;
+    const finishedBefore = new Set(trackedFor(id).filter(item => TERMINAL_STATES.has(item.state)).map(item => item.id));
     const cached = historyCache.get(id);
     const controller = new AbortController();
     const request = { id, recover, controller, timeout: null, promise: null };
@@ -869,7 +1012,6 @@ async function syncSnapshot({ initial = false, recover = false, force = false, r
         try {
             const query = new URLSearchParams();
             if (cached) query.set('revision', cached.revision);
-            if (tracked) query.set('request_id', tracked.id);
             const data = await api(`/sessions/${encodeURIComponent(id)}/snapshot?${query}`, { signal: controller.signal });
             if (!stillCurrent()) return false;
             const history = data.history ?? cached?.history;
@@ -877,7 +1019,6 @@ async function syncSnapshot({ initial = false, recover = false, force = false, r
                 throw new Error('The server returned an incomplete conversation state.');
             }
             const changed = !cached || cached.revision !== data.revision;
-            sendIdentityAvailable = data.send_identities === true;
             const reply = canonicalReply(data.reply, history);
             replyTrackingAvailable = !!reply;
             const unreadChanged = replies?.observe(id, reply) || false;
@@ -886,15 +1027,14 @@ async function syncSnapshot({ initial = false, recover = false, force = false, r
             if (data.busy) nextBusy.add(id);
             const busyChanged = nextBusy.size !== serverBusy.size || [...nextBusy].some(key => !serverBusy.has(key));
             serverBusy = nextBusy;
-            const reconciled = reconcileReceipt(id, candidate, data, recover);
-            if (changed || initial || reconciled || refreshView || reconcileViews.has(id) || finishedBefore.size) renderHistory(history, initial || isScrolledToBottom, finishedBefore);
+            if (changed || initial || refreshView || reconcileViews.has(id) || finishedBefore.size) renderHistory(history, initial || isScrolledToBottom, finishedBefore);
             reconcileViews.delete(id);
             historyReady = true;
             connected = true;
             connectionStatus();
             displayedReply = reply ? { ...reply, id } : null;
             scheduleReplyRead();
-            if (busyChanged || reconciled || unreadChanged) renderSessions();
+            if (busyChanged || unreadChanged) renderSessions();
             updateInputState();
             return true;
         } catch (error) {
@@ -1026,58 +1166,94 @@ async function syncReplyBatch() {
     return request.promise;
 }
 
-function invalidateReceiptCheck() {
-    if (!activeReceiptCheck) return;
-    clearTimeout(activeReceiptCheck.timeout);
-    activeReceiptCheck.controller.abort();
-    activeReceiptCheck = null;
+function invalidateOperationChecks() {
+    for (const check of operationChecks.values()) {
+        clearTimeout(check.timeout);
+        check.controller.abort();
+    }
+    operationChecks.clear();
 }
 
-async function syncBackgroundReceipt() {
-    if (document.visibilityState !== 'visible') return false;
-    if (activeReceiptCheck) return activeReceiptCheck.promise;
-    // One extra GET per poll, round-robin over unresolved local Sends only.
-    // No all-history polling, new timer or automatic POST retry.
-    const ids = sessions.map(session => session.id).filter(id => id !== currentSession && hasReceipts(id));
-    if (!ids.length) return false;
-    const id = ids[backgroundReceiptCursor++ % ids.length];
-    const candidate = receiptCandidate(id);
-    const controller = new AbortController();
+async function syncOperations(id = currentSession) {
+    if (!id || document.visibilityState !== 'visible') return false;
+    if (operationChecks.has(id)) return operationChecks.get(id).promise;
+    const controller = new AbortController(), navigation = navigationVersion;
     const request = { controller, timeout: setTimeout(() => controller.abort(), 8000), promise: null };
-    activeReceiptCheck = request;
+    operationChecks.set(id, request);
+    const valid = () => operationChecks.get(id) === request && !controller.signal.aborted
+        && navigation === navigationVersion && sessions.some(item => item.id === id);
     request.promise = (async () => {
         try {
-            const query = new URLSearchParams({ request_id: candidate.tracked.id });
-            const cached = historyCache.get(id);
-            if (cached) query.set('revision', cached.revision);
-            const data = await api(`/sessions/${encodeURIComponent(id)}/snapshot?${query}`, { signal: controller.signal });
-            if (activeReceiptCheck !== request || controller.signal.aborted || id === currentSession
-                || document.visibilityState !== 'visible') return false;
-            if (typeof data.revision !== 'string' || typeof data.busy !== 'boolean') throw new Error('Incomplete conversation state.');
-            const relevant = isTracked(id, candidate.tracked);
-            if (!relevant) return false;
-            const wasBusy = serverBusy.has(id);
-            const delivery = deliveryStatus(id);
-            const reconciled = reconcileReceipt(id, candidate, data);
-            // This response owns only its requested session's activity evidence.
-            // Never replace the selected view/cache or its global busy snapshot.
-            if (data.busy) serverBusy.add(id);
-            else serverBusy.delete(id);
-            if (wasBusy !== data.busy || delivery !== deliveryStatus(id) || reconciled) renderSessions();
-            if (reconciled) reconcileViews.add(id);
+            const base = `/sessions/${encodeURIComponent(id)}/operations`;
+            const data = await api(base, { signal: controller.signal });
+            if (!valid()) return false;
+            if (!Array.isArray(data.operations)) throw Error('Incomplete operations response.');
+            // Validate the entire response before touching the owner, including
+            // session identity. A stale revision never rolls back a newer POST.
+            data.operations.forEach(op => validateOperation(id, op));
+            readRecoveryAcknowledgements(id, data);
+            if (typeof data.recovery_required === 'boolean') recoveryRequired.set(id, data.recovery_required);
+            showRecovery();
+            let changed = false;
+            for (const op of data.operations) changed = applyOperation(id, op) || changed;
+            const returned = new Set(data.operations.map(op => op.id));
+            const missing = trackedFor(id).filter(item => item.attempted && !item.dismissed
+                && ['sending', 'unknown', 'queued', 'running', 'indeterminate'].includes(item.state) && !returned.has(item.id));
+            if (missing.length) {
+                const start = (operationQueryCursor.get(id) || 0) % missing.length;
+                const batch = Array.from({ length: Math.min(64, missing.length) }, (_, index) => missing[(start + index) % missing.length]);
+                operationQueryCursor.set(id, (start + batch.length) % missing.length);
+                const query = new URLSearchParams();
+                batch.forEach(item => query.append('request_id', item.id));
+                const exact = await api(`${base}?${query}`, { signal: controller.signal });
+                if (!valid()) return false;
+                if (!Array.isArray(exact.operations)) throw Error('Incomplete operations response.');
+                exact.operations.forEach(op => validateOperation(id, op));
+                readRecoveryAcknowledgements(id, exact);
+                const wanted = new Set(batch.map(item => item.id));
+                for (const op of exact.operations) if (wanted.has(op.id)) changed = applyOperation(id, op) || changed;
+                // Missing is not proof of refusal: a POST may still be in flight.
+                // Never resend it, or automatically release held successors.
+            }
+            // Do not retain an unbounded success history. Recovery text and
+            // durable dismissal tombstones remain owned so server rediscovery
+            // cannot revive text the human explicitly restored or dismissed.
+            for (const item of trackedFor(id)) {
+                if (item.state === 'succeeded' && !item.display && !item.transport && !returned.has(item.id)) {
+                    operations.get(id).delete(item.id);
+                }
+            }
+            if (changed) {
+                renderSessions(); updateInputState();
+                if (id === currentSession) {
+                    const cached = historyCache.get(id);
+                    if (cached) renderHistory(cached.history);
+                }
+            }
             return true;
-        } catch { return false; } // Offscreen failures must not disconnect the selected conversation.
+        } catch {
+            recoveryRequired.set(id, recoveryRequired.get(id) || 'unavailable');
+            showRecovery();
+            return false; // No usable state or automatic recovery is inferred.
+        }
         finally {
             clearTimeout(request.timeout);
-            if (activeReceiptCheck === request) activeReceiptCheck = null;
+            if (operationChecks.get(id) === request) operationChecks.delete(id);
         }
     })();
     return request.promise;
 }
 
+async function syncBackgroundOperations() {
+    const ids = sessions.map(session => session.id).filter(id => id !== currentSession && hasUnresolvedOperations(id));
+    if (!ids.length) return false;
+    return syncOperations(ids[backgroundOperationCursor++ % ids.length]);
+}
+
 function pollUpdates(options = {}) {
     syncSnapshot(options);
-    syncBackgroundReceipt();
+    syncOperations();
+    syncBackgroundOperations();
     syncReplyBatch();
 }
 
@@ -1092,10 +1268,9 @@ function pauseUpdates() {
     if (pollTimer !== null) clearInterval(pollTimer);
     pollTimer = null;
     invalidateSnapshot();
-    invalidateReceiptCheck();
+    invalidateOperationChecks();
     invalidateReplyCheck();
     cancelReplyRead();
-    for (const group of pendingSends.values()) for (const request of group.values()) request.needsRecovery = true;
 }
 
 function resumeUpdates() {
@@ -1123,7 +1298,7 @@ async function selectSession(id, closeDrawer = true, focusComposer = false) {
     if (id === currentSession) { if (focusComposer) focusDesktopComposer(); return; }
     if (currentSession) drafts.set(currentSession, input.value);
     invalidateSnapshot();
-    invalidateReceiptCheck();
+    invalidateOperationChecks();
     invalidateReplyCheck();
     cancelReplyRead();
     displayedReply = null;
@@ -1150,7 +1325,7 @@ async function selectSession(id, closeDrawer = true, focusComposer = false) {
     rememberSession(id);
     updateInputState();
     if (focusComposer) focusDesktopComposer();
-    await loadHistory(id);
+    await Promise.all([loadHistory(id), syncOperations(id)]);
 }
 
 function newSendId() {
@@ -1160,66 +1335,83 @@ function newSendId() {
     return Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('');
 }
 
-async function sendMessage() {
-    const text = input.value.trim();
-    if (!currentSession) { notice('Choose a conversation first. Your draft is unchanged.'); return; }
-    if (!text) { notice('Write a message first.'); return; }
-    if (!hasSendCapacity(currentSession, text)) {
-        notice('Not sent: local message limit reached. Restore or dismiss saved messages. Your draft is unchanged.');
-        return;
+async function admitOperation(id, request) {
+    request.state = 'sending';
+    request.attempted = true;
+    request.transport = new AbortController();
+    // Persist identity and exact text BEFORE fetch. Saved staging is never an outbox.
+    persistOperations();
+    const timeout = setTimeout(() => request.transport?.abort(), 8000);
+    try {
+        if (request.dismissed) return;
+        const data = await api(`/sessions/${encodeURIComponent(id)}/operations`, {
+            ...jsonRequest('POST', { message: request.text, request_id: request.id }), signal: request.transport.signal,
+        });
+        if (!isTracked(id, request) || request.dismissed) return;
+        if (data.operation?.id !== request.id) throw Error('Mismatched operation admission.');
+        validateOperation(id, data.operation);
+        if (data.operation.message !== request.text) throw Error('Mismatched operation message.');
+        applyOperation(id, data.operation);
+    } catch (error) {
+        if (isTracked(id, request) && !request.dismissed && request.revision < 0) {
+            if (error.status >= 400 && error.status < 500 && !error.unconfirmed) {
+                request.state = 'refused';
+                request.display = false;
+                request.detail = error.message;
+                notice(`Not accepted in “${sessionTitle(id)}”: ${error.message}. Your message is saved below.`);
+            } else markUnknown(id, request);
+        }
+    } finally {
+        clearTimeout(timeout);
+        request.transport = null;
+        persistOperations();
+        showUnconfirmed(); renderSessions(); updateInputState();
+        pumpAdmissions(id);
+        if (currentSession === id) syncSnapshot({ force: true, refreshView: true });
     }
-    if (!hasTransportCapacity(text)) {
-        notice(text === '!stop'
-            ? 'Not sent: a stop request is still pending. Your draft is unchanged.'
-            : 'Not sent: two requests are still pending. Your draft is unchanged.');
+}
+
+function pumpAdmissions(id) {
+    const records = trackedFor(id).filter(item => !item.dismissed);
+    if (records.some(item => item.transport)) return;
+    const blocked = records.some(item => blocksAdmission(id, item));
+    const next = records.find(item => item.state === 'staged' && (!blocked || item.text.trim() === '!stop'));
+    if (next) void admitOperation(id, next);
+}
+
+async function sendMessage() {
+    const text = input.value;
+    if (!currentSession) { notice('Choose a conversation first. Your draft is unchanged.'); return; }
+    if (!text.trim()) { notice('Write a message first.'); return; }
+    if (!hasSendCapacity(currentSession, text)) {
+        notice('Not sent: local saved-message limit reached. Restore or dismiss saved messages. Your draft is unchanged.');
         return;
     }
     const id = currentSession;
+    const stop = text.trim() === '!stop';
+    if (!stop && trackedFor(id).some(item => !item.dismissed && blocksAdmission(id, item))) {
+        notice('Not sent: an earlier acceptance is unknown. Check it and explicitly restore or dismiss saved messages first. Your draft is unchanged.');
+        return;
+    }
     let requestId;
     try {
         requestId = newSendId();
-        if (trackedFor(id).some(item => item.id === requestId)) throw new Error('Duplicate Send identity');
-    }
-    catch { notice('This browser could not safely identify the send. Your draft has been kept.'); return; }
-    notice();
-    const request = { id: requestId, text, needsRecovery: false, accepted: false, settled: false, transport: new AbortController() };
+        if (operations.get(id)?.has(requestId) || savedDismissal(id, requestId)) throw Error('Duplicate operation identity');
+    } catch { notice('This browser could not safely identify the send. Your draft has been kept.'); return; }
+    notice(storageWarning);
+    const request = { id: requestId, text, state: 'staged', revision: -1, attempted: false, display: true, transport: null };
     ++sendGeneration;
     invalidateSnapshot();
-    if (text === '!stop') { invalidateReceiptCheck(); invalidateReplyCheck(); }
-    addPending(id, request);
-    addDisplay(id, request);
-    activePosts.set(request, { sessionId: id, request });
+    ownOperation(id, request);
+    persistOperations();
     input.value = '';
     drafts.delete(id);
     resizeInput();
     appendMessage(text, 'user', true, request.id);
-    renderSessions();
-    updateInputState();
+    renderSessions(); updateInputState();
     document.dispatchEvent(new CustomEvent('limilink:human-send', { detail: { sessionId: id, requestId: request.id } }));
-    try {
-        const response = api('/chat', { ...jsonRequest('POST', { session_id: id, message: text, request_id: request.id }), signal: request.transport.signal });
-        if (text !== '!stop') syncSnapshot({ force: true });
-        const body = await response;
-        if (typeof body.reply !== 'string') throw new Error('The server returned an incomplete Send response.');
-        settleSend(id, request, { status: 200, body });
-    } catch (error) {
-        if (isTracked(id, request) && !request.settled) {
-            if (error.status && !error.unconfirmed) settleSend(id, request, { status: error.status, body: { detail: error.message } });
-            else {
-                request.needsRecovery = true;
-                if (!request.accepted) {
-                    removePending(id, request);
-                    preserveUnconfirmed(id, request);
-                }
-            }
-        }
-    } finally {
-        if (activePosts.get(request)?.request === request) activePosts.delete(request);
-        request.transport = null;
-        renderSessions();
-        updateInputState();
-        if (currentSession === id) await syncSnapshot({ force: true, refreshView: true });
-    }
+    pumpAdmissions(id);
+    return request;
 }
 
 function resizeInput() {
@@ -1243,6 +1435,10 @@ document.addEventListener('visibilitychange', () => {
 window.addEventListener('pageshow', resumeUpdates);
 window.addEventListener('focus', resumeUpdates);
 window.addEventListener('online', () => { invalidateSnapshot(); resumeUpdates(); });
+byId('review-recovery').addEventListener('click', reviewRecovery);
+byId('acknowledge-recovery').addEventListener('change', showRecovery);
+byId('confirm-recovery').addEventListener('click', confirmRecovery);
+
 byId('restore-unconfirmed').addEventListener('click', () => {
     if (!currentSession) return;
     const records = recoverableForView();
@@ -1312,6 +1508,7 @@ async function initialize() {
             empty: () => emptyConversation('New conversation', 'Start a conversation when you’re ready.'),
             onPrepend: () => { isScrolledToBottom = false; chatGeometry = measureChatGeometry(); scheduleReplyRead(); },
         });
+        restoreOperations();
         await readSessions();
         readSucceeded = true;
         const last = savedSession();

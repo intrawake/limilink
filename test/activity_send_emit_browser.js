@@ -14,12 +14,12 @@ async page => {
         });
         let posts = 0, body;
         view.on('request', request => {
-            if (request.method() === 'POST' && request.url().endsWith('/chat')) { posts++; body = request.postDataJSON(); }
+            if (request.method() === 'POST' && request.url().endsWith('/operations')) { posts++; body = request.postDataJSON(); }
         });
         await view.goto(base + '/'); await view.waitForSelector('.session-row');
         await view.locator('.session-row[data-session-id="session_b"] .session-link').click();
         await view.waitForFunction(() => currentSession === 'session_b' && historyReady && connected);
-        const sent = view.waitForRequest(request => request.method() === 'POST' && request.url().endsWith('/chat'));
+        const sent = view.waitForRequest(request => request.method() === 'POST' && request.url().endsWith('/operations'));
         await view.locator('#message-input').fill('Local echo: follow boundary'); await view.locator('#send-btn').click();
         await sent;
         const events = await view.evaluate(() => window.boundaries);
@@ -34,7 +34,7 @@ async page => {
         await view.locator('#message-input').fill('Keep this unsent draft'); await view.locator('#send-btn').click();
         check(await view.locator('#message-input').inputValue() === 'Keep this unsent draft', 'Draft lost');
         check(posts === 1 && await view.evaluate(() => window.boundaries.length) === 1, 'Refresh/invalid Send advanced boundary');
-        await view.waitForFunction(() => !pendingSends.has('session_b') && activePosts.size === 0);
+        await view.waitForFunction(() => !pendingFor('session_b').length && !trackedFor('session_b').some(item => item.transport));
         return { passed: true, controller: 'follow', posts, boundaries: events.length, blockedStorage: true, providerCalls: 0 };
     } finally { await context.close(); }
 }

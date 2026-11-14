@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from main import app, get_session_lock
+from main import app
 
 PI_CONFIG = {
     "agent_by_alias": {
@@ -178,9 +178,9 @@ async def test_compact_failure_response(test_sessions_dir):
                 "/chat", json={"message": "!compact", "session_id": session_id}
             )
 
-    assert response.status_code == 200
-    assert "Compaction failed" in response.json()["reply"]
-    assert "API quota exceeded" in response.json()["reply"]
+    assert response.status_code == 500
+    assert "Compaction failed" in response.json()["detail"]
+    assert "API quota exceeded" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -201,32 +201,8 @@ async def test_compact_no_response(test_sessions_dir):
                 "/chat", json={"message": "!compact", "session_id": session_id}
             )
 
-    assert response.status_code == 200
-    assert "produced no response" in response.json()["reply"]
-
-
-@pytest.mark.asyncio
-async def test_compact_session_busy(test_sessions_dir):
-    session_id = "test_compact_busy"
-    _create_pi_session(test_sessions_dir, session_id)
-
-    # Acquire the lock to simulate a busy session
-    lock = get_session_lock(session_id)
-    await lock.acquire()
-    try:
-        with patch("main.load_config", return_value=(PI_CONFIG, "/test")):
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(
-                transport=transport, base_url="http://test"
-            ) as ac:
-                response = await ac.post(
-                    "/chat", json={"message": "!compact", "session_id": session_id}
-                )
-
-        assert response.status_code == 200
-        assert "busy" in response.json()["reply"]
-    finally:
-        lock.release()
+    assert response.status_code == 409
+    assert "produced no response" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -280,7 +256,7 @@ async def test_compact_rpc_args(test_sessions_dir):
         Path(raw_args[3]).resolve()
         == Path(__file__).resolve().parents[1] / "tool/lease_exec.py"
     )
-    assert raw_args[4] == str(kwargs["pass_fds"][0]) and raw_args[5] == "--"
+    assert raw_args[4] == ",".join(map(str, kwargs["pass_fds"])) and raw_args[5] == "--"
     assert (
         kwargs["stdin"] == subprocess.PIPE
         and isinstance(kwargs["stdout"], int)

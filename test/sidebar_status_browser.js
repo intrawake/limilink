@@ -19,17 +19,17 @@ async page => {
         await page.waitForFunction(() => historyReady && replies && sessions.some(item => item.id === 'session_a'));
         await page.evaluate(() => {
             pauseUpdates();
-            serverBusy.clear(); pendingSends.clear(); unconfirmedSends.clear();
+            serverBusy.clear(); operations.clear();
             sessions.find(item => item.id === 'session_a').title = 'A very long conversation title that still leaves every status and the options menu usable';
-            addPending('session_a', { id: 'f'.repeat(32), text: 'Not admitted' });
+            ownOperation('session_a', { id: 'f'.repeat(32), text: 'Not admitted', state: 'staged' });
             renderSessions();
         });
         const row = page.locator('.session-row[data-session-id="session_a"]');
         check(await row.locator('.session-working').count() === 0, 'Local pending Send incorrectly means Working');
         check(await row.locator('.session-delivery').textContent() === 'Sending…', 'Delivery status lost');
         await page.evaluate(() => {
-            pendingSends.clear(); serverBusy.add('session_a');
-            unconfirmedSends.set('session_a', [{ id: 'e'.repeat(32), text: 'Unconfirmed fixture', failed: false }]);
+            operations.clear(); serverBusy.add('session_a');
+            ownOperation('session_a', { id: 'e'.repeat(32), text: 'Unconfirmed fixture', state: 'unknown' });
             replies.observe('session_a', { state: 'known', token: 'r1:' + '0'.repeat(64), index: 0 });
             replies.observe('session_a', { state: 'known', token: 'r1:' + '1'.repeat(64), index: 1 });
             renderSessions();
@@ -47,7 +47,7 @@ async page => {
             check(await working.getAttribute('title') === 'Working', 'Working tooltip lost');
             check(await working.getAttribute('aria-label') === 'Working', 'Working accessible name lost');
             check(await row.locator('.session-unread').isVisible(), 'Working hid unread reply');
-            check(await row.locator('.session-delivery').textContent() === 'Unconfirmed', 'Working hid delivery uncertainty');
+            check(await row.locator('.session-delivery').textContent() === 'Acceptance unknown', 'Working hid delivery uncertainty');
             check(await row.locator('summary').textContent() === '⋯', 'Options menu changed');
             const geometry = await row.evaluate(node => {
                 const link = node.querySelector('.session-link').getBoundingClientRect();
@@ -73,7 +73,7 @@ async page => {
         await row.locator('summary').click();
         await page.evaluate(() => { serverBusy.clear(); renderSessions(); });
         check(await row.locator('.session-working').count() === 0, 'Idle session retained working indicator');
-        check(await row.locator('.session-unread').isVisible() && await row.locator('.session-delivery').textContent() === 'Unconfirmed', 'Idle cleared unrelated facts');
+        check(await row.locator('.session-unread').isVisible() && await row.locator('.session-delivery').textContent() === 'Acceptance unknown', 'Idle cleared unrelated facts');
         check(writes.length === 0, 'Presentation check made a mutating request');
         return { controller: variant, widths: [1280, 375, 320], working: 'static hourglass with Working tooltip/name', motion: 'none under either preference',
             separate: ['server work', 'delivery uncertainty', 'unread'], menu: 'unchanged and usable', requests: 'GET/HEAD only' };

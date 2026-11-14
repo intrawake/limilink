@@ -292,3 +292,63 @@ def test_actual_offline_pi_high_fd_does_not_reach_descendants(tmp_path):
                 os.killpg(worker, signal.SIGTERM)
             except ProcessLookupError:
                 pass
+
+
+def test_node_inherits_both_stable_locks_without_leaking_to_tools(tmp_path):
+    """Node's descriptor initialization must preserve BOTH low-FD locks."""
+    from delivery import lock_file
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Supported Node launcher unavailable")
+    root = tmp_path / "sessions"
+    root.mkdir(exist_ok=True)
+    fence = lock_file(root / ".execution-fixture")
+    child = None
+    try:
+        with session_lease(root, "fixture") as lease:
+            assert fence is not None and lease is not None
+            code = """
+const fs=require('fs'),{spawnSync}=require('child_process');
+const locks=[3,4].map(fd=>{const s=fs.fstatSync(fd);return [s.dev,s.ino]});
+const probe=spawnSync(process.execPath,['-e',`const fs=require('fs');
+const locks=${JSON.stringify(locks)};let found=false;
+for(const n of fs.readdirSync('/proc/self/fd')){try{const s=fs.fstatSync(+n);
+if(locks.some(([d,i])=>d===s.dev&&i===s.ino))found=true;}catch{}}
+console.log(JSON.stringify(found));`],{encoding:'utf8'});
+console.log(JSON.stringify({locks,leaked:JSON.parse(probe.stdout)}));
+process.stdin.resume();
+"""
+            child = subprocess.Popen(
+                pi_lease_command([node, "-e", code], lease, fence),
+                pass_fds=(lease, fence),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            assert child.stdout is not None
+            with selectors.DefaultSelector() as selector:
+                selector.register(child.stdout, selectors.EVENT_READ)
+                assert selector.select(timeout=10)
+                report = json.loads(child.stdout.readline())
+            assert not report["leaked"]
+            assert report["locks"] == [
+                [os.fstat(fd).st_dev, os.fstat(fd).st_ino] for fd in (lease, fence)
+            ]
+        os.close(fence)
+        fence = None
+        assert lock_file(root / ".execution-fixture") is None
+        with session_lease(root, "fixture", exclusive=True) as other:
+            assert other is None
+        assert child.stdin is not None
+        child.stdin.close()
+        assert child.wait(timeout=10) == 0
+        reacquired = lock_file(root / ".execution-fixture")
+        assert reacquired is not None
+        os.close(reacquired)
+    finally:
+        if fence is not None:
+            os.close(fence)
+        if child is not None and child.poll() is None:
+            child.kill()
+            child.wait(timeout=10)

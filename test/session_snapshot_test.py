@@ -88,10 +88,10 @@ def test_revision_survives_fresh_client_and_legacy_history_contract_is_unchanged
     client, root
 ):
     first = client.get("/sessions/session_a/snapshot").json()
-    with TestClient(main.app) as fresh:
-        same = fresh.get(
-            "/sessions/session_a/snapshot", params={"revision": first["revision"]}
-        ).json()
+    fresh = TestClient(main.app)
+    same = fresh.get(
+        "/sessions/session_a/snapshot", params={"revision": first["revision"]}
+    ).json()
     assert same["revision"] == first["revision"]
     assert "history" not in same
     assert client.get("/sessions/session_a/history").json() == {
@@ -177,7 +177,8 @@ async def test_snapshot_observes_work_from_another_client_while_post_is_pending(
             await started.wait()
             working = (await client.get("/sessions/session_a/snapshot")).json()
             assert working["busy"]
-            assert working["history"][-1] == {"role": "user", "content": "hello"}
+            assert working["history"][-1] == {"role": "bot", "content": "First"}
+            # Running work is represented by operations, not an early history write.
             release.set()
             assert (await task).status_code == 200
             done = (
@@ -187,7 +188,9 @@ async def test_snapshot_observes_work_from_another_client_while_post_is_pending(
                 )
             ).json()
             assert not done["busy"]
-            assert done["history"][-1] == {
+            assert {
+                k: v for k, v in done["history"][-1].items() if k != "request_id"
+            } == {
                 "role": "bot",
                 "content": "Finished elsewhere",
             }

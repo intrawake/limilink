@@ -38,7 +38,7 @@ test(`${name}: bounded round-robin metadata batch does not alter history/activit
         await syncReplyBatch(); await syncReplyBatch(); await syncReplyBatch();
         if (batches.some(ids => ids.length >8 || ids.includes('session_0') || new Set(ids).size !== ids.length)) throw Error('Unbounded/duplicate/selected batch');
         if (new Set(batches.flat()).size !==20) throw Error('Rotation starved a known session');
-        if (historyCache.size || pendingSends.size || !serverBusy.has('session_0') || !connected || !historyReady || renders) throw Error('Metadata crossed its ownership seam');
+        if (historyCache.size || operations.size || !serverBusy.has('session_0') || !connected || !historyReady || renders) throw Error('Metadata crossed its ownership seam');
     })()`);
 });
 

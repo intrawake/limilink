@@ -124,26 +124,20 @@ def test_gc_skips_active_sessions(test_sessions_dir, monkeypatch):
     os.utime(hist_path, (old_time, old_time))
     os.utime(sess_path, (old_time, old_time))
 
-    # Simulate the session having an active process
-    # Use a mock object as running process entry
-    from unittest.mock import AsyncMock
-
+    # A real lifecycle lease protects admitted work, not a process-ID mock.
     import main
+    from pathlib import Path
 
-    main.running_processes[sid] = AsyncMock()  # type: ignore[assignment]
-
-    resp = client.post(
-        "/chat",
-        json={"message": "!gc day 0", "session_id": "gc_active"},
-    )
-    assert resp.status_code == 200
-    reply = resp.json()["reply"]
-    assert "Skipped" in reply
-    assert sid in reply
-    assert os.path.isdir(sess_path)
-
-    # Clean up
-    del main.running_processes[sid]
+    with main.session_admission(Path(test_sessions_dir), sid):
+        resp = client.post(
+            "/chat",
+            json={"message": "!gc day 0", "session_id": "gc_active"},
+        )
+        assert resp.status_code == 200
+        reply = resp.json()["reply"]
+        assert "Skipped" in reply
+        assert sid in reply
+        assert os.path.isdir(sess_path)
 
 
 def test_gc_uses_directory_mtime_fallback(test_sessions_dir):

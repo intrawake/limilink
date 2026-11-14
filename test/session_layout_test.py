@@ -1,6 +1,5 @@
 """Persistent titles/order never change session IDs or conversation files."""
 
-import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -39,7 +38,7 @@ def details(client):
 
 
 def test_legacy_list_is_unchanged_and_default_titles_need_no_migration(client, root):
-    expected = sorted(path.name for path in root.iterdir())
+    expected = sorted(path.name for path in root.iterdir() if path.is_dir())
     assert client.get("/sessions").json() == {"sessions": expected}
     assert details(client) == [{"id": key, "title": key} for key in expected]
     assert not (root / ".session-layout.json").exists()
@@ -58,12 +57,12 @@ def test_titles_and_order_persist_across_clients_without_renaming_directories(
         json={"session_ids": ["session_c", "session_a", "session_b"]},
     )
     assert response.status_code == 200
-    with TestClient(app) as fresh:
-        assert details(fresh) == [
-            {"id": "session_c", "title": "session_c"},
-            {"id": "session_a", "title": "First case 🕵️"},
-            {"id": "session_b", "title": "session_b"},
-        ]
+    fresh = TestClient(app)
+    assert details(fresh) == [
+        {"id": "session_c", "title": "session_c"},
+        {"id": "session_a", "title": "First case 🕵️"},
+        {"id": "session_b", "title": "session_b"},
+    ]
     assert (root / "session_a/chat_history.json").read_bytes() == before
     assert sorted(path.name for path in root.iterdir() if path.is_dir()) == [
         "session_a",
@@ -210,9 +209,7 @@ def test_simultaneous_renames_and_order_save_keep_each_other(root):
 
 
 def test_busy_session_cannot_be_deleted(client, root):
-    lock = asyncio.Lock()
-    asyncio.run(lock.acquire())
-    with patch.dict(main.session_locks, {"session_a": lock}):
+    with main.session_admission(root, "session_a"):
         response = client.delete("/sessions/session_a")
     assert response.status_code == 409
     assert (root / "session_a/chat_history.json").exists()

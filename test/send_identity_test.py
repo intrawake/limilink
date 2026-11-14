@@ -84,8 +84,10 @@ async def test_concurrent_and_completed_replay_invoke_chat_once(root):
             assert (await client.post("/chat", json=body())).json() == one.json()
     assert len(history(root)) == 2
     assert calls == ["hello"]
-    assert not main.active_web_sends
     assert not main.session_activity
+    await (
+        main.get_delivery_owner().close()
+    )  # Explicit service restart, not a second live owner.
     with TestClient(main.app) as fresh, patch("main._process_chat") as forbidden:
         assert fresh.post("/chat", json=body()).json() == {"reply": "single reply"}
         forbidden.assert_not_called()
@@ -174,16 +176,16 @@ async def test_cancelling_duplicate_waiter_does_not_cancel_owner(root):
             release.set()
             assert (await first).json() == {"reply": "finished"}
     assert invoke.call_count == 1
-    assert not main.active_web_sends
 
 
 @pytest.mark.asyncio
-async def test_owner_cancellation_unblocks_waiters_but_never_permits_reexecution(root):
-    started = asyncio.Event()
+async def test_http_owner_cancellation_keeps_service_work_and_duplicate_waiter(root):
+    started, release = asyncio.Event(), asyncio.Event()
 
     async def blocked(*args):
         started.set()
-        await asyncio.Event().wait()
+        await release.wait()
+        return "finished once"
 
     with patch("main._process_chat", side_effect=blocked) as invoke:
         async with httpx.AsyncClient(
@@ -192,16 +194,18 @@ async def test_owner_cancellation_unblocks_waiters_but_never_permits_reexecution
             first = asyncio.create_task(client.post("/chat", json=body()))
             await started.wait()
             duplicate = asyncio.create_task(client.post("/chat", json=body()))
-            await asyncio.sleep(0)
             first.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await first
+            assert (await client.get("/sessions/session_a/operations/" + A)).json()[
+                "operation"
+            ]["state"] == "running"
+            release.set()
             response = await asyncio.wait_for(duplicate, timeout=1)
-            assert response.status_code == 409
-            assert response.json()["code"] == "send_indeterminate"
-            assert (await client.post("/chat", json=body())).status_code == 409
+            assert response.status_code == 200
+            assert response.json() == {"reply": "finished once"}
+            assert (await client.post("/chat", json=body())).json() == response.json()
     assert invoke.call_count == 1
-    assert not main.active_web_sends
     assert not main.session_activity
 
 
@@ -228,14 +232,21 @@ def test_orphan_running_reservation_after_restart_never_executes(root):
 
 
 def test_terminal_write_failure_does_not_allow_a_second_invocation(root, calls):
+    from delivery import write_operation
+
+    def saving(path, record, *, create=False):
+        if record["state"] in ("succeeded", "indeterminate"):
+            raise OSError("disk full")
+        return write_operation(path, record, create=create)
+
     with TestClient(main.app) as client:
-        with patch("main.complete_send", side_effect=OSError("disk full")):
+        with patch("delivery.write_operation", side_effect=saving):
             first = client.post("/chat", json=body())
         assert first.status_code == 409
         assert first.json()["code"] == "send_indeterminate"
         assert client.post("/chat", json=body()).status_code == 409
     assert len(calls) == 1
-    assert len(history(root)) == 2
+    assert history(root) == []  # Result persistence precedes history publication.
     assert (
         json.loads(receipt_path(root / "session_a", A).read_text())["state"]
         == "running"
@@ -262,16 +273,17 @@ async def test_trash_waits_for_execution_and_receipt_persistence_then_rejects_st
         await release.wait()
         return "done"
 
-    from send_receipt import complete_send
+    from delivery import write_operation
 
-    def saving(path, reservation, outcome):
-        assert expire_session_trash(root, lambda key: False, now=200) == []
-        assert (root / "session_a").is_dir()
-        complete_send(path, reservation, outcome)
+    def saving(path, record, *, create=False):
+        if record["state"] == "succeeded":
+            assert expire_session_trash(root, lambda key: False, now=200) == []
+            assert (root / "session_a").is_dir()
+        write_operation(path, record, create=create)
 
     with (
         patch("main._process_chat", side_effect=blocked),
-        patch("main.complete_send", side_effect=saving),
+        patch("delivery.write_operation", side_effect=saving),
     ):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=main.app), base_url="http://test"
@@ -285,7 +297,7 @@ async def test_trash_waits_for_execution_and_receipt_persistence_then_rejects_st
             assert expire_session_trash(root, lambda key: False, now=200) == [
                 "session_a"
             ]
-            assert (await client.post("/chat", json=body())).status_code == 409
+            assert (await client.post("/chat", json=body())).status_code == 404
     assert not (root / "session_a").exists()
 
 
@@ -358,3 +370,61 @@ def test_reservation_elects_one_owner_across_separate_processes(root):
             if child.poll() is None:
                 child.kill()
                 child.wait(timeout=10)
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        {"status": 200, "body": {"reply": "saved upgrade-era reply"}},
+        {
+            "status": 429,
+            "body": {"detail": "saved upgrade-era refusal"},
+            "headers": {"Retry-After": "17"},
+        },
+    ],
+)
+def test_review_completed_v1_exact_replay_preserves_outcome_and_headers(
+    root, calls, outcome
+):
+    path = receipt_path(root / "session_a", A)
+    _, reservation = reserve_send(path, " original ")
+    complete_send(path, reservation, outcome)
+    original = path.read_bytes()
+    with TestClient(main.app) as client:
+        for _ in range(2):
+            response = client.post("/chat", json=body(message=" original "))
+            assert response.status_code == outcome["status"]
+            assert response.json() == outcome["body"]
+            for key, value in outcome.get("headers", {}).items():
+                assert response.headers[key] == value
+        # Recovery discovery is control metadata, not an invented legacy OP.
+        assert client.get("/sessions/session_a/operations").json() == {
+            "operations": [],
+            "recovery_required": False,
+            "recovery_acknowledged": [],
+        }
+    assert calls == [] and history(root) == []
+    assert path.read_bytes() == original
+
+
+def test_review_completed_v1_replay_conflict_is_not_false_uncertainty(root, calls):
+    path = receipt_path(root / "session_a", A)
+    _, reservation = reserve_send(path, " original ")
+    complete_send(path, reservation, {"status": 200, "body": {"reply": "saved"}})
+    with TestClient(main.app) as client:
+        response = client.post("/chat", json=body(message="original"))
+    assert response.status_code == 409
+    assert "different message" in response.json()["detail"]
+    assert "code" not in response.json()
+    assert calls == []
+
+
+def test_review_completed_v1_replay_still_obeys_trash_lifecycle(root, calls):
+    path = receipt_path(root / "session_a", A)
+    _, reservation = reserve_send(path, "hello")
+    complete_send(path, reservation, {"status": 200, "body": {"reply": "saved"}})
+    queue_session_trash(root, "session_a")
+    with TestClient(main.app) as client:
+        response = client.post("/chat", json=body())
+    assert response.status_code == 409 and "trash" in response.json()["detail"]
+    assert calls == []

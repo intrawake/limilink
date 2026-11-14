@@ -81,6 +81,10 @@ header { display: flex; align-items: center; gap: 12px; padding: 17px 24px; bord
 .quiet-button { background: transparent; border-color: var(--line); border-radius: 7px; padding: 7px 12px; }
 #notice { padding: 10px 24px; color: #ffd0bf; background: #3b2927; border-bottom: 1px solid #69433b; font-size: 13px; }
 #connection-status { padding: 7px 24px; color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--line); }
+#session-recovery { padding: 10px 24px; font-size: 13px; background: #302b22; border-bottom: 1px solid #5a4c33; }
+#recovery-status { white-space: pre-wrap; overflow-wrap: anywhere; }
+#recovery-consent:not([hidden]) { display: block; margin: 8px 0; }
+#session-recovery button { margin: 6px 6px 0 0; }
 #unconfirmed-send { padding: 10px 24px; font-size: 13px; background: #302b22; border-bottom: 1px solid #5a4c33; }
 #unconfirmed-send details { margin: 6px 0; }
 #unconfirmed-text { max-height: 120px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }

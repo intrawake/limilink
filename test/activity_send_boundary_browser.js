@@ -39,7 +39,7 @@ async page => {
     // Real UI Send: exactly one event with opaque IDs, before exactly one local echo POST.
     await page.evaluate(() => { window.humanBoundaries = []; document.addEventListener('limilink:human-send', event => window.humanBoundaries.push(event.detail)); });
     let posts = 0, firstBody;
-    const count = request => { if (request.method() === 'POST' && request.url().endsWith('/chat')) { posts++; firstBody ??= request.postDataJSON(); } };
+    const count = request => { if (request.method() === 'POST' && request.url().endsWith('/operations')) { posts++; firstBody ??= request.postDataJSON(); } };
     page.on('request', count);
     await page.locator('#message-input').fill('Local echo: child history boundary'); await page.locator('#send-btn').click();
     await page.waitForFunction(() => !document.querySelector('#activity-graph [data-id="old"]'));

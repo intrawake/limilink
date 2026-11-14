@@ -1,162 +1,67 @@
-// Requires the disposable --fake-chat fixture, never a provider.
+// Disposable preview only. Controlled contract state; no service POST forwarding.
 async page => {
     const base = 'http://127.0.0.1:11012';
-    if (!page.url().startsWith(base + '/')) throw new Error('Use the isolated fixture.');
-    const check = (value, message) => { if (!value) throw new Error(message); };
-    const ready = () => page.waitForFunction(() => currentSession && historyReady && connected && !checkingSnapshot && !pendingSends.has(currentSession));
-    const warning = page.locator('#unconfirmed-send');
+    if (!page.url().startsWith(base + '/')) throw Error('Use the isolated fixture.');
+    const check = (value, message) => { if (!value) throw Error(message); };
+    const held = [], posts = [], records = new Map();
+    let wake;
+    const arrival = count => posts.length >= count ? Promise.resolve() : new Promise(resolve => { wake = { count, resolve }; });
     const input = page.locator('#message-input');
-    const run = await page.evaluate(() => Date.now().toString(36));
-    const reset = async () => {
-        await page.reload();
-        await page.waitForSelector('.session-row');
-        await page.locator('.session-row[data-session-id="session_a"] .session-link').click();
-        await ready();
-    };
-    const resume = () => page.evaluate(() => {
-        Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
-        document.dispatchEvent(new Event('visibilitychange'));
-        Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
-        document.dispatchEvent(new Event('visibilitychange'));
-    });
-    let posts = 0;
-    const count = request => { if (request.method() === 'POST' && request.url().endsWith('/chat')) posts++; };
-    page.on('request', count);
-    await reset();
-
-    // Genuine accepted work, followed by a genuine browser transport failure.
-    await page.evaluate(() => {
-        window.receiptWarningSeen = false;
-        new MutationObserver(() => {
-            if (!document.querySelector('#unconfirmed-send').hidden) window.receiptWarningSeen = true;
-        }).observe(document.querySelector('#unconfirmed-send'), { attributes: true, attributeFilter: ['hidden'] });
-    });
-    let acceptedRoute, acceptedBody, done, seen;
-    const captured = new Promise(resolve => { seen = resolve; });
-    const completed = new Promise(resolve => { done = resolve; });
-    await page.route('**/chat', async route => {
-        acceptedRoute = route;
-        acceptedBody = route.request().postDataJSON();
-        seen();
-        await route.fetch();
-        done();
-    });
-    await input.fill(`Quiet accepted resume ${run}`);
-    await page.locator('#send-btn').click();
-    await captured;
-    await page.waitForFunction(async id => {
-        const data = await (await fetch(`/sessions/session_a/snapshot?request_id=${id}`)).json();
-        return data.send?.state === 'running';
-    }, acceptedBody.request_id);
-    await input.fill('Keep my newer draft');
-    await resume();
-    await page.waitForFunction(() => document.querySelector('#typing').textContent === 'Thinking…' && document.querySelector('#connection-status').hidden);
-    check(await warning.isHidden(), 'Live accepted Send incorrectly warned on resume');
-    await acceptedRoute.abort('failed');
-    await completed;
-    await ready();
-    check(await warning.isHidden(), 'Completed accepted Send incorrectly warned after transport loss');
-    check(await page.evaluate(() => !window.receiptWarningSeen), 'Accepted Send flashed a transient uncertainty warning');
-    check(await input.inputValue() === 'Keep my newer draft', 'Receipt reconciliation changed the newer draft');
-    await page.unroute('**/chat');
-
-    // A permanently missing A must not starve receipt discovery for a later B.
-    await reset();
-    const missing = `Permanently missing ${run}`;
-    const later = `Later accepted ${run}`;
-    const held = [];
-    await page.route('**/chat', route => { held.push(route); });
-    for (const text of [missing, later]) {
-        await input.fill(text);
-        await page.locator('#send-btn').click();
-        await page.waitForFunction(() => pendingFor(currentSession).length === 1);
-        await resume();
-        // Receipt recovery can finish while both actual POST transports remain held.
-        await page.waitForFunction(() => !pendingSends.has(currentSession) && connected && !checkingSnapshot);
-        check((await page.locator('#unconfirmed-text').textContent()).includes(text), 'Actually missing Send was not preserved');
-    }
-    check(held.length === 2, 'Resume silently posted another Send');
-    const laterResponse = await held[1].fetch(); // First admitted now; browser reply remains held.
-    await page.waitForFunction(text => !document.querySelector('#unconfirmed-text').textContent.includes(text) && !document.querySelector('#send-btn').disabled, later, { timeout: 15000 });
-    check((await page.locator('#unconfirmed-text').textContent()).includes(missing), 'Unresolved older Send text was discarded');
-    await held[0].abort('failed');
-    await held[1].fulfill({ response: laterResponse });
-    await page.unroute('**/chat');
-
-    // A receipt GET already in flight cannot resurrect text the human dismissed.
-    let dismissedGet, dismissedData, gotDismissed;
-    const checkingDismissed = new Promise(resolve => { gotDismissed = resolve; });
-    const dismissedId = held[0].request().postDataJSON().request_id;
-    await page.route('**/sessions/session_a/snapshot*', async route => {
-        if (!route.request().url().includes(`request_id=${dismissedId}`)) { await route.continue(); return; }
-        dismissedGet = route;
-        dismissedData = await (await route.fetch()).json();
-        gotDismissed();
-    });
-    await page.evaluate(() => { syncSnapshot({ force: true }); });
-    await checkingDismissed;
-    await page.locator('#dismiss-unconfirmed').click();
-    dismissedData.send = { id: dismissedId, state: 'complete', outcome: { status: 429, body: { detail: 'Late dismissed failure' } } };
-    await dismissedGet.fulfill({ json: dismissedData });
-    await page.evaluate(() => new Promise(requestAnimationFrame));
-    check(await warning.isHidden(), 'Late receipt resurrected a dismissed saved message');
-    check(await page.locator('#send-btn').isEnabled(), 'Late dismissed receipt reinserted a pending request');
-    await page.unroute('**/sessions/session_a/snapshot*');
-
-    // A visible page must detect an orphan without a visibility/focus event.
-    await reset();
-    let phase = 'running', orphanRoute, orphanId;
-    await page.route('**/chat', route => { orphanRoute = route; orphanId = route.request().postDataJSON().request_id; });
-    await page.route('**/sessions/session_a/snapshot*', async route => {
-        const data = await (await route.fetch()).json();
-        if (data.send?.id === orphanId) {
-            data.send = { id: orphanId, state: phase };
-            data.busy = phase === 'running';
-            data.busy_sessions = data.busy ? ['session_a'] : [];
+    const send = async text => { await input.fill(text); await page.locator('#send-btn').click(); };
+    await page.route('**/sessions/*/operations*', async route => {
+        const request = route.request();
+        if (request.method() === 'POST') {
+            held.push(route); posts.push(request.postDataJSON());
+            if (wake && posts.length >= wake.count) { wake.resolve(); wake = null; }
+        } else {
+            const [path, query = ''] = request.url().split('?'), id = path.split('/').at(-2);
+            const wanted = query.split('&').filter(pair => pair.startsWith('request_id=')).map(pair => pair.slice('request_id='.length));
+            await route.fulfill({ json: { operations: [...records.values()].filter(item => item.session_id === id && (!wanted.length || wanted.includes(item.id))) } });
         }
-        await route.fulfill({ json: data });
     });
-    await input.fill(`Visible owner disappears ${run}`);
-    await page.locator('#send-btn').click();
-    await page.waitForFunction(() => document.querySelector('#typing').textContent === 'Thinking…');
-    check(await warning.isHidden(), 'Matching live owner was called uncertain');
-    phase = 'indeterminate'; // Only ordinary polling sees this transition.
-    await page.waitForFunction(() => !document.querySelector('#unconfirmed-send').hidden && !document.querySelector('#send-btn').disabled);
-    check((await page.locator('#unconfirmed-text').textContent()).includes('Visible owner disappears'), 'Orphaned Send remained stuck or lost its text');
-    await orphanRoute.abort('failed');
-    await page.unroute('**/chat');
-    await page.unroute('**/sessions/session_a/snapshot*');
-
-    // A malformed receipt cannot retire the request; known errors save text as failed.
-    await reset();
-    let invalid = true, errorRoute, errorId;
-    await page.route('**/chat', route => { errorRoute = route; errorId = route.request().postDataJSON().request_id; });
-    await page.route('**/sessions/session_a/snapshot*', async route => {
-        const data = await (await route.fetch()).json();
-        if (data.send?.id === errorId) data.send = { id: errorId, state: 'complete', outcome: invalid
-            ? { status: 200, body: {} }
-            : { status: 429, body: { detail: 'Fixture refusal' } } };
-        await route.fulfill({ json: data });
-    });
-    const failedText = `Preserve known failure ${run}`;
-    await input.fill(failedText);
-    await page.locator('#send-btn').click();
-    await page.waitForFunction(() => document.querySelector('#connection-status').textContent.includes('Connection lost'));
-    check(await warning.isHidden(), 'Malformed complete receipt caused a false acknowledgement/warning');
-    check(await page.evaluate(id => pendingFor(currentSession).some(item => item.id===id && !item.settled), errorId), 'Malformed complete receipt cleared pending state');
-    await input.fill('New draft stays');
-    invalid = false;
-    await ready();
-    check((await page.locator('#saved-send-status').textContent()).includes('send failed'), 'Known error was mislabeled as possibly lost');
-    check((await page.locator('#unconfirmed-text').textContent()).includes(failedText), 'Known failure discarded submitted text');
-    await errorRoute.fulfill({ status: 429, json: { detail: 'Fixture refusal' } });
-    await page.evaluate(() => new Promise(requestAnimationFrame));
-    check((await page.locator('#unconfirmed-text').textContent()).includes(failedText), 'Late HTTP error cleared saved failed text');
-    await page.locator('#restore-unconfirmed').click();
-    check(await input.inputValue() === `New draft stays\n\n${failedText}`, 'Restoring failed text overwrote the newer draft');
-    await page.unroute('**/chat');
-    await page.unroute('**/sessions/session_a/snapshot*');
-    page.off('request', count);
-    check(posts === 5, `Unexpected automatic POST: ${posts} instead of five explicit Sends`);
-    return { passed: true, cases: ['quiet live/completed receipt despite transport failure', 'no transient false warning', 'fair saved-receipt polling', 'dismissal wins over late receipt', 'ordinary-poll orphan detection', 'malformed receipt retained', 'known failure text retained across late HTTP error'], browserPosts: posts, providers: 0 };
+    try {
+        await page.setViewportSize({ width: 1280, height: 900 }); await page.bringToFront();
+        await page.evaluate(() => { localStorage.clear(); localStorage.setItem('limilink_last_session', 'session_a'); });
+        await page.reload(); await page.waitForFunction(() => currentSession === 'session_a' && historyReady);
+        await send('Attempt with lost acceptance'); await arrival(1);
+        await send('Later staged, not sent');
+        check(posts.length === 1, 'Staged successor sent before acceptance');
+        await input.fill('Keep newer draft');
+        await held[0].abort('failed');
+        await page.locator('#unconfirmed-send').waitFor({ state: 'visible' });
+        check((await page.locator('#unconfirmed-text').textContent()).includes('Later staged, not sent'), 'Unsent successor text lost');
+        check(await input.inputValue() === 'Keep newer draft', 'Transport loss changed newer draft');
+        check((await page.locator('#saved-send-status').textContent()).includes('unknown'), 'Lost admission called safely failed');
+        const accepted = { id: posts[0].request_id, session_id: 'session_a', sequence: 0, revision: 1, state: 'running', message: posts[0].message, execution_id: 'fake-execution', outcome: null };
+        records.set(accepted.id, accepted);
+        await page.evaluate(() => syncOperations());
+        check(posts.length === 1, 'GET recovery automatically released an unsent successor');
+        check(await page.locator('#unconfirmed-text').textContent() === 'Later staged, not sent', 'Accepted identity failed to reconcile independently');
+        check((await page.locator('#saved-send-status').textContent()).includes('Not sent'), 'Held successor not explicitly unsent');
+        await page.reload(); await page.waitForFunction(() => currentSession === 'session_a' && historyReady);
+        await page.evaluate(() => syncOperations());
+        check(posts.length === 1, 'Reload replayed accepted or unsent text');
+        check(await page.locator('#unconfirmed-text').textContent() === 'Later staged, not sent', 'Reload lost staged text');
+        check((await page.locator('#typing').textContent()) === 'Thinking…', 'Known running operation not recovered');
+        await input.fill('Keep restored draft');
+        await page.locator('#restore-unconfirmed').click();
+        check(await input.inputValue() === 'Keep restored draft\n\nLater staged, not sent', 'Explicit restore overwrote or duplicated draft');
+        check(posts.length === 1, 'Restore silently sent');
+        // Failed result is retained; stale revision cannot roll it back to running.
+        records.set(accepted.id, { ...accepted, state: 'failed', revision: 2, outcome: { status: 500, body: { detail: 'Fixture failure' } } });
+        await page.evaluate(() => syncOperations());
+        check((await page.locator('#unconfirmed-text').textContent()).includes('Attempt with lost acceptance'), 'Failed outcome discarded original text');
+        records.set(accepted.id, accepted);
+        await page.evaluate(() => syncOperations());
+        check((await page.locator('#unconfirmed-text').textContent()).includes('Attempt with lost acceptance'), 'Stale state cleared failure');
+        await page.locator('#dismiss-unconfirmed').click();
+        records.set(accepted.id, { ...accepted, state: 'failed', revision: 3, outcome: { status: 500, body: { detail: 'Late failure' } } });
+        await page.evaluate(() => syncOperations());
+        check(await page.locator('#unconfirmed-send').isHidden(), 'Late GET resurrected dismissed text');
+        return { passed: true, posts: posts.length, providers: 0, cases: ['lost admission retains identity/text', 'uncertainty holds successors unsent', 'recovery never auto-releases', 'reload GET only', 'explicit draft restoration', 'failed outcome and stale revision', 'dismissal wins'] };
+    } finally {
+        await page.evaluate(() => pauseUpdates()).catch(() => {});
+        for (const route of held) { try { await route.abort('failed'); } catch {} }
+        await page.unroute('**/sessions/*/operations*');
+    }
 }

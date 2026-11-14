@@ -96,7 +96,7 @@ async page => {
     // Complete a chat after history already contains its reply; never duplicate it.
     let chatRoute, sent;
     const chatSeen = new Promise(resolve => { sent = resolve; });
-    await page.route('**/chat', route => { chatRoute = route; sent(); });
+    await page.route('**/sessions/*/operations', route => { if (route.request().method() !== 'POST') return route.continue(); chatRoute = route; sent(); });
     await page.locator('#message-input').fill('Hello Alpha');
     await page.locator('#message-input').press('Enter');
     await chatSeen;
@@ -111,12 +111,13 @@ async page => {
     await select('session_b');
     await select('session_a');
     const reconciled = page.waitForResponse(response => response.url().includes('/sessions/session_a/snapshot'));
-    await chatRoute.fulfill({ json: { reply: 'Exactly one reply' } });
+    const body=chatRoute.request().postDataJSON();
+    await chatRoute.fulfill({ json: { operation: { id:body.request_id, session_id:'session_a', sequence:0, revision:1, state:'succeeded', message:body.message, execution_id:null, outcome:{status:200,body:{reply:'Exactly one reply'}} } } });
     await reconciled;
-    await page.waitForFunction(() => !pendingSends.has(currentSession) && activeSnapshot === null);
+    await page.waitForFunction(() => !pendingFor(currentSession).length && activeSnapshot === null);
     check(await page.locator('.message.bot').count() === 1, 'Reply duplicated after history reconciliation');
     check(await page.locator('.message.user').count() === 1, 'User message duplicated after history reconciliation');
-    await page.unroute('**/chat');
+    await page.unroute('**/sessions/*/operations');
     await page.unroute('**/sessions/session_a/snapshot*');
 
     // Titles are text, never HTML.
@@ -145,7 +146,7 @@ async page => {
     const rejectedTrash = 'Retain server-rejected trash message';
     await page.locator('#message-input').fill(rejectedTrash);
     await page.locator('#send-btn').click();
-    await page.waitForFunction(text => unconfirmedSends.get(currentSession)?.some(item => item.text === text && item.failed), rejectedTrash);
+    await page.waitForFunction(text => trackedFor(currentSession).some(item => item.text === text && item.state === 'refused'), rejectedTrash);
     check((await page.locator('#unconfirmed-text').textContent()).includes(rejectedTrash), 'Server trash rejection lost text');
     const deadline = await row('session_a').locator('.trash-countdown').getAttribute('data-delete-at');
     await page.reload();
@@ -214,7 +215,7 @@ async page => {
     check(await phone.locator('#session-sidebar').evaluate(element => element.inert), 'Session selection did not close phone drawer');
     await phone.locator('#message-input').fill('Mobile newline');
     let mobileCalls = 0;
-    await phone.route('**/chat', route => { mobileCalls++; route.abort(); });
+    await phone.route('**/sessions/*/operations', route => { if (route.request().method() !== 'POST') return route.continue(); mobileCalls++; route.abort(); });
     await phone.locator('#message-input').press('Enter');
     check((await phone.locator('#message-input').inputValue()).includes('\n'), 'Mobile Enter did not insert a newline');
     check(mobileCalls === 0, 'Mobile Enter unexpectedly sent a message');

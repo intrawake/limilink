@@ -2,7 +2,7 @@ import argparse
 import atexit
 import logging
 import os
-import shutil
+from contextlib import asynccontextmanager
 import signal
 import sys
 
@@ -59,20 +59,31 @@ def main():
     os.makedirs(sessions_dir, exist_ok=True)
     pid_file = os.path.join(sessions_dir, "server.pid")
 
-    with open(pid_file, "w") as f:
-        f.write(str(os.getpid()))
-
     def cleanup():
-        if os.path.exists(pid_file):
-            os.remove(pid_file)
-        # Wipe all per-session tmp directories
-        from main import get_session_tmp_dir
+        try:
+            with open(pid_file) as source:
+                mine = source.read() == str(os.getpid())
+            if mine:
+                os.remove(pid_file)
+        except FileNotFoundError:
+            pass
+        # No root-wide tmp sweep: a writer inherited across a server crash may
+        # still own those files. Its execution adapter owns per-turn cleanup.
 
-        if os.path.isdir(sessions_dir):
-            for entry in os.listdir(sessions_dir):
-                session_tmp = get_session_tmp_dir(os.path.join(sessions_dir, entry))
-                if os.path.isdir(session_tmp):
-                    shutil.rmtree(session_tmp, ignore_errors=True)
+    owner_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def server_lifespan(application):
+        # Claim the root BEFORE publishing a PID or changing any session state.
+        async with owner_lifespan(application):
+            with open(pid_file, "w") as output:
+                output.write(str(os.getpid()))
+            try:
+                yield
+            finally:
+                cleanup()
+
+    app.router.lifespan_context = server_lifespan
 
     atexit.register(cleanup)
 

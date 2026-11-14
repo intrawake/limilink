@@ -5,7 +5,7 @@ async page => {
     await page.setViewportSize({ width: 1440, height: 900 });
     let busy = false, revision = 1, posts = 0;
     let history = Array.from({ length: 35 }, (_, i) => ({ role: 'bot', content: `Message ${i}\n${'A readable sentence that wraps when the Activity panel takes some width. '.repeat(12)}` }));
-    const countPosts = request => { if (request.method() === 'POST' && request.url().endsWith('/chat')) posts++; };
+    const countPosts = request => { if (request.method() === 'POST' && request.url().endsWith('/operations')) posts++; };
     page.on('request', countPosts);
     await page.route('**/sessions/session_a/snapshot*', route => route.fulfill({ json: { session_id: 'session_a', revision: String(revision), history, busy, busy_sessions: busy ? ['session_a'] : [] } }));
     await page.goto(page.url());

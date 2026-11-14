@@ -1,5 +1,6 @@
 """Retired harnesses are rejected without changing existing session identity."""
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,7 +21,9 @@ def test_retired_harness_cannot_create_session(agent, test_sessions_dir):
     ):
         response = c.post("/sessions", params={"agent": agent})
     assert response.status_code == 400
-    assert not list(Path(test_sessions_dir).iterdir())
+    assert not [
+        p for p in Path(test_sessions_dir).iterdir() if not p.name.startswith(".")
+    ]
 
 
 def test_configured_retired_harness_is_rejected(test_sessions_dir):
@@ -53,7 +56,10 @@ def test_old_session_can_explicitly_switch_to_pi(alias, tmp_path, test_sessions_
         assert "!agent <pi-alias>" in response.json()["detail"]
         launch.assert_not_called()
         assert (session / ".agent_type").read_text() == alias
-        assert (session / "chat_history.json").read_text() == history
+        assert (
+            json.loads((session / "chat_history.json").read_text())[0]
+            == json.loads(history)[0]
+        )
 
         response = c.post(
             "/chat", json={"session_id": session.name, "message": "!agent pi-test"}

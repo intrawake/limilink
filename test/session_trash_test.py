@@ -129,7 +129,7 @@ def test_restart_recovers_due_deletion_and_stale_requests_cannot_resurrect(root)
             client.post(
                 "/sessions/session_a/notifyme", json={"message": "late job"}
             ).status_code
-            == 200
+            == 404
         )
     assert not (root / "session_a").exists()
     with TestClient(main.app) as fresh:
@@ -289,6 +289,6 @@ def test_agent_inherits_lease_independently_of_environment_overrides(root):
             "/chat", json={"session_id": "session_a", "message": "hello"}
         )
     assert response.status_code == 200
-    assert len(launch.call_args.kwargs["pass_fds"]) == 1
+    assert len(launch.call_args.kwargs["pass_fds"]) == 2
     assert isinstance(launch.call_args.kwargs["pass_fds"][0], int)
     assert launch.call_args.kwargs["env"]["LIMILINK_SESSION"] == "forged"

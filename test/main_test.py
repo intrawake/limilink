@@ -24,7 +24,7 @@ def _pi_command(mock_exec):
         Path(args[3]).resolve()
         == Path(__file__).resolve().parents[1] / "tool/lease_exec.py"
     )
-    assert args[4] == str(kwargs["pass_fds"][0])
+    assert args[4] == ",".join(map(str, kwargs["pass_fds"]))
     assert args[5] == "--"
     assert kwargs["process_group"] == 0
     assert kwargs["stdout"] == subprocess.PIPE and kwargs["stderr"] == subprocess.PIPE
@@ -711,13 +711,13 @@ async def test_run_notifyme_task_lock_held_skips_agent(test_sessions_dir):
     session_path = os.path.join(test_sessions_dir, session_id)
     os.makedirs(session_path, exist_ok=True)
 
-    mock_lock = MagicMock()
-    mock_lock.locked.return_value = True
+    mock_owner = MagicMock()
+    mock_owner.busy.return_value = True
 
     with (
         patch("main.process_chat") as mock_process_chat,
         patch("main.enqueue_unread_message") as mock_enqueue,
-        patch("main.get_session_lock", return_value=mock_lock),
+        patch("main.get_delivery_owner", return_value=mock_owner),
     ):
         await run_notifyme_task(session_id, "background command finished")
 
@@ -738,13 +738,13 @@ async def test_run_notifyme_task_lock_free_calls_agent(test_sessions_dir):
     session_path = os.path.join(test_sessions_dir, session_id)
     os.makedirs(session_path, exist_ok=True)
 
-    mock_lock = MagicMock()
-    mock_lock.locked.return_value = False
+    mock_owner = MagicMock()
+    mock_owner.busy.return_value = False
 
     with (
         patch("main.process_chat") as mock_process_chat,
         patch("main.enqueue_unread_message") as mock_enqueue,
-        patch("main.get_session_lock", return_value=mock_lock),
+        patch("main.get_delivery_owner", return_value=mock_owner),
     ):
         mock_process_chat.return_value = "looks like it finished successfully"
 
@@ -772,13 +772,13 @@ async def test_run_notifyme_task_agent_error_still_delivers_raw(test_sessions_di
     session_path = os.path.join(test_sessions_dir, session_id)
     os.makedirs(session_path, exist_ok=True)
 
-    mock_lock = MagicMock()
-    mock_lock.locked.return_value = False
+    mock_owner = MagicMock()
+    mock_owner.busy.return_value = False
 
     with (
         patch("main.process_chat") as mock_process_chat,
         patch("main.enqueue_unread_message") as mock_enqueue,
-        patch("main.get_session_lock", return_value=mock_lock),
+        patch("main.get_delivery_owner", return_value=mock_owner),
     ):
         mock_process_chat.side_effect = RuntimeError("agent exploded")
 

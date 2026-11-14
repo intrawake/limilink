@@ -39,6 +39,12 @@
             </header>
             <div id="notice" role="status" hidden></div>
             <div id="connection-status" role="status" hidden></div>
+            <section id="session-recovery" role="status" aria-label="Paused session recovery" hidden>
+                <p id="recovery-status"></p>
+                <button id="review-recovery" class="quiet-button">Review paused session</button>
+                <label id="recovery-consent" hidden><input id="acknowledge-recovery" type="checkbox"> I checked the conversation and possible external effects. I accept that past outcomes remain unknown.</label>
+                <button id="confirm-recovery" class="quiet-button" hidden disabled>Allow new messages</button>
+            </section>
             <div id="unconfirmed-send" role="status" hidden>
                 <span id="saved-send-status">Delivery couldn’t be confirmed. Check the conversation before resending.</span>
                 <details><summary>Saved message</summary><pre id="unconfirmed-text"></pre></details>

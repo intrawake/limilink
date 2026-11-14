@@ -100,7 +100,7 @@ def test_corrupt_receipt_is_indeterminate_not_a_false_ack(client, root, raw):
 
 
 def test_unreadable_and_nonregular_receipts_are_indeterminate(client, root):
-    with patch("main.read_send", side_effect=PermissionError):
+    with patch("delivery.read_operation", side_effect=PermissionError):
         assert peek(client).json()["send"]["state"] == "indeterminate"
     path = receipt_path(root / "session_a", A)
     os.mkfifo(path)
@@ -108,15 +108,16 @@ def test_unreadable_and_nonregular_receipts_are_indeterminate(client, root):
 
 
 @pytest.mark.asyncio
-async def test_live_owner_proves_only_matching_id_and_cancellation_makes_it_indeterminate(
+async def test_live_owner_proves_only_matching_id_and_http_cancellation_does_not_cancel_it(
     root,
 ):
-    started = asyncio.Event()
+    started, release = asyncio.Event(), asyncio.Event()
 
     async def blocked(session_id, message, lease_fd, request_id=None):
         main.append_to_history(str(root / session_id), "user", message)
         started.set()
-        await asyncio.Event().wait()
+        await release.wait()
+        return "finished"
 
     with patch("main._process_chat", side_effect=blocked) as execute:
         async with httpx.AsyncClient(
@@ -144,9 +145,7 @@ async def test_live_owner_proves_only_matching_id_and_cancellation_makes_it_inde
                 )
             ).json()
             assert matching["send"] == {"id": A, "state": "running"}
-            assert unrelated["busy"] and unrelated["history"] == [
-                {"role": "user", "content": "hello"}
-            ]
+            assert unrelated["busy"] and unrelated["history"] == []
             assert unrelated["send"] == {"id": B, "state": "missing"}
             owner.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -156,9 +155,20 @@ async def test_live_owner_proves_only_matching_id_and_cancellation_makes_it_inde
                     "/sessions/session_a/snapshot", params={"request_id": A}
                 )
             ).json()
-            assert orphan["send"] == {"id": A, "state": "indeterminate"}
+            assert orphan["send"] == {"id": A, "state": "running"}
+            release.set()
+            assert (
+                await client.post(
+                    "/chat",
+                    json={
+                        "session_id": "session_a",
+                        "message": "hello",
+                        "request_id": A,
+                    },
+                )
+            ).status_code == 200
     assert execute.call_count == 1
     assert (
         json.loads(receipt_path(root / "session_a", A).read_text())["state"]
-        == "running"
+        == "succeeded"
     )

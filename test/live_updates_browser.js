@@ -53,11 +53,12 @@ async page => {
         let firstRoute, firstResponse, secondRoute, firstDone, secondSeen;
         const completed = new Promise(resolve => { firstDone = resolve; });
         const secondCaptured = new Promise(resolve => { secondSeen = resolve; });
-        await page.route('**/chat', async route => {
+        await page.route('**/sessions/*/operations', async route => {
+            if (route.request().method() !== 'POST') return route.continue();
             const message = route.request().postDataJSON().message;
             if (message === firstText) {
                 firstRoute = route;
-                firstResponse = await route.fetch(); // Real server work finishes; browser POST stays pending.
+                firstResponse = await route.fetch(); // Real admission finishes; browser response stays pending.
                 firstDone();
             } else if (message === secondText) {
                 secondRoute = route; // Not admitted yet: idle snapshots must not clear this send.
@@ -96,7 +97,7 @@ async page => {
         const messages = await page.locator('.message').allTextContents();
         check(messages.filter(text => text === secondText).length === 1, 'Newer user message duplicated');
         check(messages.filter(text => text === `Fixture reply: ${secondText}`).length === 1, 'Newer reply duplicated');
-        await page.unroute('**/chat');
+        await page.unroute('**/sessions/*/operations');
     }
     await lostResponseScenario('success', false);
     await lostResponseScenario('failure', true);
@@ -137,7 +138,7 @@ async page => {
     await page.unroute('**/sessions/session_a/snapshot*');
 
     // HTTP rejection is a known failure, not an accepted optimistic message.
-    await page.route('**/chat', route => route.fulfill({ status: 409, json: { detail: 'Test rejection' } }));
+    await page.route('**/sessions/*/operations', route => route.request().method() === 'POST' ? route.fulfill({ status: 409, json: { detail: 'Test rejection' } }) : route.continue());
     let rejectSnapshot = true;
     await page.route('**/sessions/session_a/snapshot*', route => rejectSnapshot ? route.fulfill({ status: 500, json: { detail: 'Temporary snapshot failure' } }) : route.continue());
     await input.fill('Rejected message must not remain in history');
@@ -151,7 +152,7 @@ async page => {
     check((await page.locator('#saved-send-status').textContent()).includes('send failed'), 'Known rejection was mislabeled as uncertainty');
     check((await page.locator('#unconfirmed-text').textContent()).includes('Rejected message must not remain'), 'Known rejection discarded submitted text');
     await page.locator('#dismiss-unconfirmed').click();
-    await page.unroute('**/chat');
+    await page.unroute('**/sessions/*/operations');
     await page.unroute('**/sessions/session_a/snapshot*');
 
     // Keep history, scroll, draft, and focus through offline errors and new replies.
@@ -180,11 +181,11 @@ async page => {
     check(await input.evaluate(element => document.activeElement === element), 'Incoming reply stole focus');
 
     // Saved uncertain text is restored only on request and never replaces a draft.
-    await page.route('**/chat', route => route.abort('failed'));
+    await page.route('**/sessions/*/operations', route => route.request().method() === 'POST' ? route.abort('failed') : route.continue());
     await input.fill('Delivery uncertainty fixture');
     await send.click();
     await page.waitForFunction(() => !document.querySelector('#unconfirmed-send').hidden);
-    await page.unroute('**/chat');
+    await page.unroute('**/sessions/*/operations');
     await input.fill('New draft must survive');
     await page.locator('#restore-unconfirmed').click();
     check(await input.inputValue() === 'New draft must survive\n\nDelivery uncertainty fixture', 'Restoring uncertain text overwrote the newer draft');

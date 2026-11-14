@@ -4,7 +4,7 @@ async page => {
     const check = (value, message) => { if (!value) throw new Error(message); };
     const history = Array.from({ length: 45 }, (_, i) => ({ role: 'bot', content: `Message ${i}\nReading line one\nReading line two\nReading line three` }));
     let busy = false, hold = false, held, seen, chatPosts = 0;
-    const countPosts = request => { if (request.method() === 'POST' && request.url().endsWith('/chat')) chatPosts++; };
+    const countPosts = request => { if (request.method() === 'POST' && request.url().endsWith('/operations')) chatPosts++; };
     page.on('request', countPosts);
     const state = () => ({ session_id: 'session_a', revision: 'scroll-stable', history, busy, busy_sessions: busy ? ['session_a'] : [] });
     await page.route('**/sessions/session_a/snapshot*', route => {

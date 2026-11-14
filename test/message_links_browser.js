@@ -26,7 +26,7 @@ async page => {
     await page.route(snapshot, route => route.fulfill({ json: {
         revision: 'links-' + revision, history, busy: false, busy_sessions: [], reply: { state: 'unknown' }, send_identities: true,
     } }));
-    await page.route('**/chat', route => new Promise(resolve => { held = { route, resolve }; }));
+    await page.route('**/sessions/*/operations', route => route.request().method() === 'POST' ? new Promise(resolve => { held = { route, resolve }; }) : route.continue());
     const outsideRequests = [];
     await page.context().route('https://example.invalid/**', async route => {
         outsideRequests.push(route.request().headers());
@@ -85,7 +85,7 @@ async page => {
         const sent = '[Optimistic](/optimistic) <https://example.invalid/pending>';
         await input.fill(sent);
         await page.locator('#send-btn').click();
-        await page.waitForFunction(() => pendingSends.size === 1);
+        await page.waitForFunction(() => pendingFor(currentSession).length === 1);
         const optimistic = chat.getByRole('link', { name: 'Optimistic', exact: true });
         await optimistic.evaluate(node => { node.dataset.optimistic = 'kept'; });
         await page.evaluate(() => syncSnapshot({ force: true }));
@@ -99,15 +99,16 @@ async page => {
         check(await chat.getByRole('link', { name: 'Optimistic', exact: true }).count() === 1, 'Canonical update duplicated optimistic link');
         check(await chat.locator('.message[data-kept="yes"]').count() === 1, 'Linkification rebuilt old canonical nodes');
         check(held, 'Synthetic Send was not intercepted');
-        await held.route.fulfill({ json: { reply: 'Reply [Appended](/appended)' } }); held.resolve(); held = null;
-        await page.waitForFunction(() => pendingSends.size === 0 && activePosts.size === 0 && activeSnapshot === null);
+        const body=held.route.request().postDataJSON();
+        await held.route.fulfill({ json: { operation: { id:body.request_id, session_id:'session_c', sequence:0, revision:1, state:'succeeded', message:body.message, execution_id:null, outcome:{status:200,body:{reply:'Reply [Appended](/appended)'}} } } }); held.resolve(); held = null;
+        await page.waitForFunction(() => pendingFor(currentSession).length === 0 && !trackedFor(currentSession).some(item => item.transport) && activeSnapshot === null);
         return { controller: variant, labelled: true, autolinks: ['http', 'https'], relative: true,
             literal: ['code', 'unfinished fence', 'HTML', 'images', 'unsafe schemes'],
             stages: ['history', 'older', 'optimistic', 'canonical append'], widths: [1280, 375, 320],
             navigation: 'keyboard/new tab/no opener or referrer/draft retained', network: 'fixture and intercepted target only' };
     } finally {
         if (held) { await held.route.fulfill({ status: 500, json: { detail: 'Fixture cleanup' } }); held.resolve(); }
-        await page.unroute('**/chat');
+        await page.unroute('**/sessions/*/operations');
         await page.unroute(snapshot);
         await page.unroute(entry);
         await page.context().unroute('https://example.invalid/**');

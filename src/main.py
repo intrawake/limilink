@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import aiofiles
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
-import signal
 import subprocess
 import time
 import threading
+import tempfile
 import uuid
 from contextlib import ExitStack, asynccontextmanager, contextmanager, suppress
 from enum import Enum
@@ -29,9 +30,10 @@ except ImportError:
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StrictBool, field_validator
 
 from session_layout import (
+    SESSION_STAGING_PREFIX,
     InvalidSessionOrder,
     TrashExpired,
     delete_session_now,
@@ -45,6 +47,13 @@ from session_layout import (
     trash_deadline,
 )
 
+from delivery import (
+    DeliveryOwner,
+    ExecutionUncertain,
+    current_attempt,
+    projecting,
+    public,
+)
 from compact_rpc import CompactRPCError, compact_rpc
 from session_lease import SessionLeaseBusy, pi_lease_command, session_lease
 from session_snapshot import cached_reply_evidence, history_snapshot
@@ -52,10 +61,8 @@ from session_activity import activity_snapshot
 from send_receipt import (
     SendConflict,
     SendIndeterminate,
-    complete_send,
     receipt_path,
     read_send,
-    reserve_send,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,11 +70,14 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def app_lifespan(app: FastAPI):
+    owner = get_delivery_owner()
     sweep_session_trash()
     worker = asyncio.create_task(trash_worker())
     try:
         yield
     finally:
+        await owner.close()
+        delivery_owners.pop(str(owner.root), None)
         worker.cancel()
         with suppress(asyncio.CancelledError):
             await worker
@@ -86,25 +96,75 @@ class HarnessType(str, Enum):
         raise ValueError(f"Unsupported harness type: {value}")
 
 
-# Global tracker for running agent harness processes (session_id -> process)
-running_processes: dict[str, asyncio.subprocess.Process] = {}
-session_locks: dict[str, asyncio.Lock] = {}
 lifecycle_gate = threading.RLock()
 session_activity: dict[tuple[str, str], int] = {}
-active_web_sends: dict[tuple[str, str, str], asyncio.Future[dict]] = {}
+# Exactly one owner per canonical root, independent of HTTP request lifetimes.
+delivery_owners: dict[str, DeliveryOwner] = {}
+
+
+def project_operation(root: Path, record: dict):
+    token = projecting.set(True)
+    try:
+        path = str(root / record["session_id"])
+        append_to_history(path, "user", record["message"], request_id=record["id"])
+        outcome = record["outcome"]
+        if outcome is not None:
+            body = outcome["body"]
+            text = body.get("reply", body.get("detail", ""))
+            if not isinstance(text, str):
+                text = json.dumps(text)
+            append_to_history(path, "bot", text, request_id=record["id"])
+    finally:
+        projecting.reset(token)
+
+
+def get_delivery_owner() -> DeliveryOwner:
+    cfg, config_dir = load_config()
+    root = Path(get_sessions_dir(cfg, config_dir)).resolve()
+    key = str(root)
+    owner = delivery_owners.get(key)
+    if (
+        owner is not None
+        and not owner.closed
+        and owner.loop is not asyncio.get_running_loop()
+    ):
+        if not owner.loop.is_closed():
+            raise RuntimeError("Delivery owner belongs to another live event loop")
+        os.close(owner.fd)
+        owner.closed = True
+    if owner is None or owner.closed:
+        owner = DeliveryOwner(
+            root,
+            _process_chat,
+            session_admission,
+            lambda record: project_operation(root, record),
+            recovery_context,
+            lambda root, sid: session_admission(root, sid, exclusive=True),
+        )
+        delivery_owners[key] = owner
+    return owner
+
+
+def admit_operation(session_id, request_id, message, *, create=False, owner=None):
+    cfg, _ = load_config()
+    limit = cfg.get("session_queue_limit", 16)
+    if type(limit) is not int or limit <= 0:
+        raise HTTPException(500, "session_queue_limit must be a positive integer")
+    return (owner or get_delivery_owner()).admit(
+        session_id, request_id, message, limit, create=create
+    )
 
 
 def session_is_busy(root: Path, session_id: str) -> bool:
-    lock = session_locks.get(session_id)
-    return (
-        session_activity.get((str(root.resolve()), session_id), 0) > 0
-        or session_id in running_processes
-        or (lock is not None and lock.locked())
+    owner = delivery_owners.get(str(root.resolve()))
+    return bool(
+        (owner is not None and owner.busy(session_id))
+        or session_activity.get((str(root.resolve()), session_id), 0) > 0
     )
 
 
 @contextmanager
-def session_admission(root: Path, session_id: str):
+def session_admission(root: Path, session_id: str, *, exclusive=False):
     key = (str(root.resolve()), session_id)
     with ExitStack() as stack:
         with lifecycle_gate:
@@ -119,9 +179,16 @@ def session_admission(root: Path, session_id: str):
                     status_code=409,
                     detail="Session is in trash. Undo before its deadline to continue.",
                 )
-            fd = stack.enter_context(session_lease(root, session_id))
+            fd = stack.enter_context(
+                session_lease(root, session_id, exclusive=exclusive)
+            )
             if fd is None:
-                raise HTTPException(status_code=409, detail="Session is being deleted.")
+                raise HTTPException(
+                    status_code=409,
+                    detail="Session still has a writer/activity lease; recovery refused."
+                    if exclusive
+                    else "Session is being deleted.",
+                )
             session_activity[key] = session_activity.get(key, 0) + 1
         try:
             yield fd
@@ -148,12 +215,6 @@ async def trash_worker():
     while True:
         await asyncio.sleep(1)
         sweep_session_trash()
-
-
-def get_session_lock(session_id: str) -> asyncio.Lock:
-    if session_id not in session_locks:
-        session_locks[session_id] = asyncio.Lock()
-    return session_locks[session_id]
 
 
 def _add_activity_observer(args: list[str], env: dict[str, str], session_path: str):
@@ -355,7 +416,9 @@ def reconcile_session_symlinks(
                     os.makedirs(os.path.dirname(link_path), exist_ok=True)
                     os.symlink(desired_target, link_path)
                 except Exception as e:
-                    print(f"Failed to create symlink {link_path}: {e}")
+                    raise ExecutionUncertain(
+                        f"Failed to create session resource {link_path}: {e}"
+                    ) from e
             continue
 
         if os.path.islink(link_path):
@@ -380,7 +443,9 @@ def reconcile_session_symlinks(
                     if os.path.lexists(replacement_path):
                         os.unlink(replacement_path)
         except Exception as e:
-            print(f"Failed to reconcile symlink {link_path}: {e}")
+            raise ExecutionUncertain(
+                f"Failed to reconcile session resource {link_path}: {e}"
+            ) from e
 
 
 def ensure_session_initialized(
@@ -410,7 +475,9 @@ async def list_sessions():
         sessions = []
         if os.path.exists(sessions_dir):
             for entry in os.listdir(sessions_dir):
-                if os.path.isdir(os.path.join(sessions_dir, entry)):
+                if not entry.startswith(SESSION_STAGING_PREFIX) and os.path.isdir(
+                    os.path.join(sessions_dir, entry)
+                ):
                     sessions.append(entry)
         return {"sessions": sorted(sessions)}
     except Exception as e:
@@ -567,28 +634,29 @@ async def create_session(agent: str | None = None):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     root = Path(sessions_dir)
-    with lifecycle_gate:
-        while (root / safe_id).exists() or trash_deadline(root, safe_id) is not None:
-            safe_id = f"session_{uuid.uuid4().hex[:8]}"
-    with session_admission(root, safe_id):
-        session_path = os.path.join(sessions_dir, safe_id)
-        os.makedirs(session_path, exist_ok=True)
-
+    root.mkdir(parents=True, exist_ok=True)
+    # Build on the same filesystem, but outside the discoverable/admissible
+    # session namespace. No awaited initializer write follows publication.
+    with tempfile.TemporaryDirectory(
+        prefix=SESSION_STAGING_PREFIX, dir=root
+    ) as staging:
         ensure_session_initialized(
-            session_path, cfg, config_dir, agent_alias=effective_agent
+            staging, cfg, config_dir, agent_alias=effective_agent
         )
-
-        agent_path = os.path.join(session_path, ".agent_type")
-        async with aiofiles.open(agent_path, "w") as f:
-            await f.write(effective_agent)
-
-        # Persist the resolved model for external tools (diary, etc.)
-        preset = agent_by_alias.get(effective_agent, {})
+        async with aiofiles.open(os.path.join(staging, ".agent_type"), "w") as output:
+            await output.write(effective_agent)
         model = preset.get("model") or cfg.get("pi_agent_model", "auto")
-        model_path = os.path.join(session_path, ".model")
-        async with aiofiles.open(model_path, "w") as f:
-            await f.write(model)
+        async with aiofiles.open(os.path.join(staging, ".model"), "w") as output:
+            await output.write(model)
 
+        with lifecycle_gate:
+            while (
+                os.path.lexists(root / safe_id)
+                or trash_deadline(root, safe_id) is not None
+            ):
+                safe_id = f"session_{uuid.uuid4().hex[:8]}"
+            with session_admission(root, safe_id):
+                os.rename(staging, root / safe_id)
         return {"status": "created", "session_id": safe_id}
 
 
@@ -648,12 +716,27 @@ def load_session_history(session_path: str) -> list[dict[Any, Any]]:
 def append_to_history(
     session_path: str, role: str, content: str, *, request_id: str | None = None
 ):
+    # During execution the operation is authoritative. Only project its history
+    # after the terminal result is persisted by the owner.
+    if current_attempt.get() is not None and not projecting.get():
+        return
     os.makedirs(session_path, exist_ok=True)
     history_file = Path(get_history_path(session_path))
     history = history_snapshot(history_file)["history"]
     item = {"role": role, "content": content}
-    if role == "user" and request_id is not None:
+    if request_id is not None:
         item["request_id"] = request_id
+        existing = [
+            entry
+            for entry in history
+            if entry.get("role") == role and entry.get("request_id") == request_id
+        ]
+        if existing:
+            if existing != [item]:
+                raise ExecutionUncertain(
+                    "History operation projection conflicts with its receipt"
+                )
+            return
     history.append(item)
     temporary = history_file.with_name(f".history.{uuid.uuid4().hex}.tmp")
     try:
@@ -679,16 +762,25 @@ async def get_session_history(session_id: str):
 def send_snapshot(root: Path, session_id: str, request_id: str) -> dict:
     result = {"id": request_id, "state": "indeterminate"}
     try:
-        record = read_send(receipt_path(root / session_id, request_id, create=False))
+        record = get_delivery_owner().lookup(session_id, request_id)
     except FileNotFoundError:
         return {**result, "state": "missing"}
     except (OSError, ValueError):
+        # Read-only compatibility with pre-owner receipts. Never use these to
+        # authorize new execution or invent the original exact message.
+        try:
+            legacy = read_send(
+                receipt_path(root / session_id, request_id, create=False)
+            )
+            if legacy["state"] == "complete":
+                return {**result, "state": "complete", "outcome": legacy["outcome"]}
+        except (OSError, ValueError):
+            pass
         return result
-    if record["state"] == "complete":
+    if record["state"] in ("queued", "running"):
+        return {**result, "state": "running"}  # Legacy clients only.
+    if record["state"] in ("succeeded", "failed", "cancelled"):
         return {**result, "state": "complete", "outcome": record["outcome"]}
-    future = active_web_sends.get((str(root.resolve()), session_id, request_id))
-    if future is not None and not future.done() and future.get_loop().is_running():
-        return {**result, "state": "running"}
     return result
 
 
@@ -716,8 +808,9 @@ async def get_session_snapshot(
                 for (owner, key), count in session_activity.items()
                 if owner == root_id and count > 0
             }
-            active.update(running_processes)
-            active.update(key for key, lock in session_locks.items() if lock.locked())
+            owner = delivery_owners.get(root_id)
+            if owner is not None:
+                active.update(key for key in owner.lanes if owner.busy(key))
             busy = session_id in active
             if not busy:
                 with session_lease(root, session_id, exclusive=True) as fd:
@@ -790,8 +883,8 @@ def write_pi_settings_json(session_path: str, reasoning_effort: str | None):
         try:
             with open(settings_path) as f:
                 settings = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            settings = {}
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ExecutionUncertain("Pi settings could not be read safely.") from exc
 
     if reasoning_effort is None:
         settings.pop("defaultThinkingLevel", None)
@@ -809,11 +902,20 @@ def write_pi_settings_json(session_path: str, reasoning_effort: str | None):
 
 
 async def process_chat(session_id: str, message: str) -> str:
-    cfg, config_dir = load_config()
-    root = Path(get_sessions_dir(cfg, config_dir))
-    safe_id = sanitize_session_id(session_id)
-    with session_admission(root, safe_id) as lease_fd:
-        return await _process_chat(session_id, message, lease_fd)
+    # Explicit legacy/Discord creation adapter; web operation admission is strict.
+    owner = get_delivery_owner()
+    record, _ = admit_operation(
+        session_id, uuid.uuid4().hex, message, create=True, owner=owner
+    )
+    record = await owner.wait(record)
+    outcome = operation_outcome(record)
+    if outcome["status"] != 200:
+        raise HTTPException(
+            outcome["status"],
+            outcome["body"].get("detail", "Operation failed"),
+            headers=outcome.get("headers"),
+        )
+    return outcome["body"]["reply"]
 
 
 async def _process_chat(
@@ -824,7 +926,10 @@ async def _process_chat(
         safe_session_id = sanitize_session_id(session_id)
 
         cfg, config_dir = load_config()
-        sessions_dir = get_sessions_dir(cfg, config_dir)
+        attempt = current_attempt.get()
+        if attempt is None:
+            raise RuntimeError("Session execution requires its delivery owner")
+        sessions_dir = str(attempt.root)
 
         # Create an isolated project directory for this session
         session_path = os.path.join(sessions_dir, safe_session_id)
@@ -840,7 +945,7 @@ async def _process_chat(
         # Determine agent alias for this session (read before init so agent-specific symlinks are applied)
         agent_by_alias = cfg.get("agent_by_alias", {})
         if not agent_by_alias:
-            raise RuntimeError("Missing 'agent_by_alias' in config.sxpb")
+            raise HTTPException(500, "Missing 'agent_by_alias' in config.sxpb")
 
         agent_path = os.path.join(session_path, ".agent_type")
         if os.path.exists(agent_path):
@@ -882,22 +987,6 @@ async def _process_chat(
         current_reasoning_effort = get_reasoning_effort_override(session_path)
         if current_reasoning_effort is None:
             current_reasoning_effort = preset.get("reasoning_effort")
-
-        # Handle stop command
-        if message.strip() == "!stop":
-            append_user()
-            process = running_processes.get(safe_session_id)
-            if process:
-                try:
-                    # Kill the whole process group to ensure sub-commands are stopped
-                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                    reply = "Agent process stopped."
-                except Exception as e:
-                    reply = f"Failed to stop process: {e}"
-            else:
-                reply = "No active agent process found for this session."
-            append_to_history(session_path, "bot", reply)
-            return reply
 
         # Handle agent switching command
         if message.startswith("!agent"):
@@ -1003,10 +1092,10 @@ async def _process_chat(
                     async with aiofiles.open(env_overrides_path, "r") as f:
                         content = await f.read()
                         env_overrides = json.loads(content)
-                except Exception:
-                    logger.debug(
-                        "Failed to load env_overrides, using empty", exc_info=True
-                    )
+                except Exception as exc:
+                    raise ExecutionUncertain(
+                        "Session environment overrides could not be read safely."
+                    ) from exc
 
             if len(parts) == 1:
                 reply = "Usage: !env <VAR_NAME> [VALUE]"
@@ -1064,6 +1153,8 @@ async def _process_chat(
             deleted = []
             skipped_active = []
             for entry in os.listdir(sessions_dir):
+                if entry.startswith(SESSION_STAGING_PREFIX):
+                    continue
                 entry_path = os.path.join(sessions_dir, entry)
                 if not os.path.isdir(entry_path):
                     continue
@@ -1253,12 +1344,6 @@ async def _process_chat(
                 append_to_history(session_path, "bot", reply)
                 return reply
 
-            lock = get_session_lock(safe_session_id)
-            if lock.locked():
-                reply = "Session is busy \u2014 wait for the current request to finish."
-                append_to_history(session_path, "bot", reply)
-                return reply
-
             custom_instructions = None
             parts = stripped_message.split(maxsplit=1)
             if len(parts) == 2:
@@ -1292,27 +1377,36 @@ async def _process_chat(
                     async with aiofiles.open(env_overrides_path, "r") as f:
                         for k, v in json.loads(await f.read()).items():
                             rpc_env[k] = v
-                except Exception:
-                    logger.debug(
-                        "Failed to load rpc env_overrides, using empty", exc_info=True
-                    )
+                except Exception as exc:
+                    raise ExecutionUncertain(
+                        "Session environment overrides could not be read safely."
+                    ) from exc
 
             _add_activity_observer(rpc_args, rpc_env, session_path)
             try:
                 compact_response = await compact_rpc(
                     [exepath, *rpc_args],
                     lease_fd=lease_fd,
+                    fence_fd=attempt.fence_fd,
+                    on_spawn=lambda process, owned_attempt=attempt: (
+                        owned_attempt.register(process, compact=True)
+                    ),
                     cwd=session_path,
                     env=rpc_env,
                     instructions=custom_instructions,
                 )
 
                 if compact_response is None:
-                    reply = "Compaction produced no response."
+                    if attempt.stop_requested:
+                        reply = "Compaction cancelled."
+                    else:
+                        raise ExecutionUncertain(
+                            "Compaction produced no response; its effects are unconfirmed."
+                        )
                 elif not compact_response.get("success"):
                     error = compact_response.get("error", "unknown error")
                     preview = error[:500] + "…" if len(error) > 500 else error
-                    reply = f"Compaction failed: {preview}"
+                    raise HTTPException(500, f"Compaction failed: {preview}")
                 else:
                     data = compact_response.get("data", {})
                     tokens_before = data.get("tokensBefore", "?")
@@ -1325,10 +1419,18 @@ async def _process_chat(
                         )
                         reply += f"\n\n{preview}"
             except CompactRPCError as error:
-                reply = str(error)
-            except Exception:
-                logger.warning("Unexpected compact RPC failure")
-                reply = "Compaction failed."
+                if "cleanup could not be confirmed" in str(error):
+                    raise ExecutionUncertain(str(error)) from error
+                if (
+                    attempt.stop_requested
+                    and attempt.process is not None
+                    and attempt.process.returncode is not None
+                ):
+                    reply = "Compaction cancelled."
+                elif attempt.process is not None:
+                    raise ExecutionUncertain(str(error)) from error
+                else:
+                    raise HTTPException(500, str(error)) from error
 
             append_to_history(session_path, "bot", reply)
             return reply
@@ -1403,10 +1505,10 @@ async def _process_chat(
                     env_overrides = json.loads(await f.read())
                 for k, v in env_overrides.items():
                     env[k] = v
-            except Exception:
-                logger.debug(
-                    "Failed to apply env_overrides, continuing without", exc_info=True
-                )
+            except Exception as exc:
+                raise ExecutionUncertain(
+                    "Session environment overrides could not be read safely."
+                ) from exc
 
         # Read-only observer: no change to prompting, stdout or process lifetime.
         _add_activity_observer(agent_args, env, session_path)
@@ -1422,96 +1524,72 @@ async def _process_chat(
             span.set_attribute("limilink.message", message)
             span.set_attribute("limilink.model", current_model)
 
-        lock = get_session_lock(safe_session_id)
-        async with lock:
-            max_attempts = 3
-            for attempt in range(max_attempts):
-                process = await asyncio.create_subprocess_exec(
-                    *pi_lease_command(cmd, lease_fd),
-                    pass_fds=(lease_fd,),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    cwd=session_path,  # Execute within the isolated directory
-                    env=env,
-                    process_group=0,  # Create a new process group for easy cleanup
-                )
-
-                running_processes[safe_session_id] = process
+        attempt = current_attempt.get()
+        assert attempt is not None
+        spawn = asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                *pi_lease_command(cmd, lease_fd, attempt.fence_fd),
+                pass_fds=(lease_fd, attempt.fence_fd),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=session_path,
+                env=env,
+                process_group=0,
+            )
+        )
+        process = None
+        try:
+            process = await asyncio.shield(spawn)
+            attempt.register(process)
+            stdout, stderr = await process.communicate()
+        finally:
+            # A service shutdown cannot abandon an in-flight spawn. Settle the
+            # exact attempt, preserving ordinary process-group signal scope.
+            if process is None:
+                process = await asyncio.shield(spawn)
+                attempt.register(process)
+            if process.returncode is None:
+                attempt.stop()
                 try:
-                    if tracer:
-                        with tracer.start_as_current_span("agent_execute") as subspan:
-                            subspan.set_attribute("agent.command", " ".join(cmd))
-                            stdout, stderr = await process.communicate()
+                    async with asyncio.timeout(5):
+                        await asyncio.shield(process.wait())
+                except (TimeoutError, OSError) as exc:
+                    raise ExecutionUncertain(
+                        "Agent process cleanup could not be confirmed."
+                    ) from exc
+            session_tmp = get_session_tmp_dir(session_path)
+            if os.path.isdir(session_tmp):
+                for entry in os.listdir(session_tmp):
+                    entry_path = os.path.join(session_tmp, entry)
+                    if os.path.isdir(entry_path) and not os.path.islink(entry_path):
+                        shutil.rmtree(entry_path)
                     else:
-                        stdout, stderr = await process.communicate()
-                finally:
-                    if running_processes.get(safe_session_id) == process:
-                        del running_processes[safe_session_id]
-                    # Clean up session tmp files after each request
-                    session_tmp = get_session_tmp_dir(session_path)
-                    if os.path.isdir(session_tmp):
-                        for entry in os.listdir(session_tmp):
-                            entry_path = os.path.join(session_tmp, entry)
-                            try:
-                                if os.path.isfile(entry_path) or os.path.islink(
-                                    entry_path
-                                ):
-                                    os.unlink(entry_path)
-                                elif os.path.isdir(entry_path):
-                                    shutil.rmtree(entry_path)
-                            except OSError:
-                                pass
+                        os.unlink(entry_path)
 
-                retcode = process.returncode
-                if retcode is None or retcode == 0:
-                    reply_text = stdout.decode().strip()
-                    reply_text = re.sub(r".*\n\[Thought: true\]", "", reply_text)
-                    if not reply_text:
-                        retcode = 1
-                        error_msg = "pi-agent exited 0 but produced no output."
-                    else:
-                        break  # Success
-                elif retcode < 0:
-                    # Process was terminated by a signal (e.g., via !stop)
-                    reply_text = f"Process terminated by signal {-retcode}."
-                    break  # Do not retry on signal
-                else:
-                    error_msg = stderr.decode().strip()
-                    if "\n    at " in error_msg:
-                        error_msg = error_msg.split("\n    at ")[0].strip()
-
-                if attempt < max_attempts - 1:
-                    print(
-                        f"Agent failed (retcode={retcode}, error={error_msg}). Retrying {attempt + 1}/{max_attempts}..."
-                    )
-                    await asyncio.sleep(2**attempt)
-                    continue
-
-                # If we reach here, it failed after max attempts
-                print(f"Agent harness error: {error_msg}")
-                # Propagate common status codes (mapped to retcode % 256)
-                # 173 = 429 % 256
-                if (
-                    retcode == 173
-                    or "429" in error_msg
-                    or "Rate limit" in error_msg
-                    or "TOO_MANY_REQUESTS" in error_msg
-                ):
-                    raise HTTPException(
-                        status_code=429, detail=f"Rate limit exceeded: {error_msg}"
-                    )
-                # 145 = 401 % 256, 147 = 403 % 256
-                if retcode in (145, 147) or "auth" in error_msg.lower():
-                    sc = 401
-                    if retcode == 147:
-                        sc = 403
-                    raise HTTPException(
-                        status_code=sc,
-                        detail=f"Authentication error: {error_msg}",
-                    )
+        retcode = process.returncode
+        if retcode == 0:
+            reply_text = re.sub(r".*\n\[Thought: true\]", "", stdout.decode().strip())
+            if not reply_text:
                 raise HTTPException(
-                    status_code=500, detail=f"Agent harness failed: {error_msg}"
+                    500,
+                    "Agent harness failed: pi-agent exited 0 but produced no output.",
                 )
+        elif retcode is not None and retcode < 0:
+            reply_text = f"Process terminated by signal {-retcode}."
+        else:
+            error_msg = stderr.decode().strip()
+            if "\n    at " in error_msg:
+                error_msg = error_msg.split("\n    at ")[0].strip()
+            if retcode == 173 or any(
+                value in error_msg
+                for value in ("429", "Rate limit", "TOO_MANY_REQUESTS")
+            ):
+                raise HTTPException(429, f"Rate limit exceeded: {error_msg}")
+            if retcode in (145, 147) or "auth" in error_msg.lower():
+                raise HTTPException(
+                    403 if retcode == 147 else 401, f"Authentication error: {error_msg}"
+                )
+            raise HTTPException(500, f"Agent harness failed: {error_msg}")
 
         # Append bot reply to history
         append_to_history(session_path, "bot", reply_text)
@@ -1522,7 +1600,7 @@ async def _process_chat(
         raise
     except Exception as e:
         logger.error(f"Internal error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise ExecutionUncertain(str(e)) from e
 
 
 def indeterminate_send(detail: str) -> dict:
@@ -1535,101 +1613,323 @@ def send_response(outcome: dict) -> JSONResponse:
     )
 
 
+def operation_outcome(record):
+    if record["state"] in ("indeterminate", "interrupted_not_started"):
+        return indeterminate_send(
+            (record.get("outcome") or {})
+            .get("body", {})
+            .get(
+                "detail",
+                "Operation interrupted or indeterminate; it will not execute again.",
+            )
+        )
+    return record["outcome"]
+
+
 async def identified_chat(request: ChatRequest) -> JSONResponse:
     assert request.request_id is not None
+    try:
+        owner = get_delivery_owner()
+        try:
+            record, _ = admit_operation(
+                request.session_id, request.request_id, request.message, owner=owner
+            )
+        except SendIndeterminate:
+            # A validated v1 completion has no exact message/sequence to invent
+            # a v2 OP from, but its preserved legacy response is authoritative.
+            # Recheck lifecycle under a lease, then compare its exact fingerprint.
+            with session_admission(owner.root, request.session_id):
+                saved = read_send(owner.path(request.session_id, request.request_id))
+                fingerprint = hashlib.sha256(
+                    request.message.encode("utf-8", "surrogatepass")
+                ).hexdigest()
+                if saved["message_sha256"] != fingerprint:
+                    raise SendConflict(
+                        "This Send ID is already bound to a different message"
+                    )
+                if saved["state"] != "complete":
+                    raise SendIndeterminate(
+                        "Previous Send has no confirmed outcome; it will not be executed again."
+                    )
+                return send_response(saved["outcome"])
+        record = await owner.wait(record)
+        return send_response(operation_outcome(record))
+    except SendConflict as exc:
+        return send_response({"status": 409, "body": {"detail": str(exc)}})
+    except (SendIndeterminate, OSError, ValueError) as exc:
+        return send_response(indeterminate_send(str(exc)))
+
+
+def recovery_context(path: Path, records: list) -> dict:
+    """Read/validate current configuration, never repair it during acknowledgement."""
+    from recovery import digest, read_file
+
     cfg, config_dir = load_config()
-    root = Path(get_sessions_dir(cfg, config_dir))
-    safe_id = sanitize_session_id(request.session_id)
-    key = (str(root.resolve()), safe_id, request.request_id)
-    with session_admission(root, safe_id) as lease_fd:
-        try:
-            with lifecycle_gate:
-                path = receipt_path(root / safe_id, request.request_id)
-                owner, reservation = reserve_send(path, request.message)
-                if not owner:
-                    if reservation["state"] == "complete":
-                        logger.info(
-                            "Replayed completed Send %s for %s",
-                            request.request_id,
-                            safe_id,
-                        )
-                        return send_response(reservation["outcome"])
-                    future = active_web_sends.get(key)
-                    if (
-                        future is None
-                        or future.get_loop() is not asyncio.get_running_loop()
-                    ):
-                        return send_response(
-                            indeterminate_send(
-                                "This Send was already reserved but has no live response. Check the conversation; it will not be executed again."
-                            )
-                        )
-                    logger.info(
-                        "Joined active Send %s for %s", request.request_id, safe_id
-                    )
-                else:
-                    future = asyncio.get_running_loop().create_future()
-                    active_web_sends[key] = future
-                    logger.info("Reserved Send %s for %s", request.request_id, safe_id)
-        except SendConflict as exc:
-            return send_response({"status": 409, "body": {"detail": str(exc)}})
-        except (SendIndeterminate, OSError, ValueError) as exc:
-            logger.warning(
-                "Could not verify Send %s for %s: %s", request.request_id, safe_id, exc
+    aliases = cfg.get("agent_by_alias")
+    if not isinstance(aliases, dict) or not aliases:
+        raise ValueError("Recovery requires valid agent configuration")
+    evidence = {}
+    for name in (
+        ".agent_type",
+        ".model",
+        ".reasoning_effort",
+        ".initialized",
+        "chat_history.json",
+        ".env_overrides.json",
+    ):
+        raw = read_file(path / name)
+        evidence[name] = raw.decode() if raw is not None else None
+    agent = (
+        evidence[".agent_type"]
+        if evidence[".agent_type"] is not None
+        else next(iter(aliases))
+    )
+    if not isinstance(agent, str):
+        raise ValueError("Invalid agent alias")
+    agent = agent.strip()
+    if not agent:
+        raise ValueError("Selected agent is empty")
+    preset = aliases.get(agent, {})
+    if not isinstance(preset, dict):
+        raise ValueError("Invalid selected agent configuration")
+    HarnessType.from_str(preset.get("harness", agent))
+    thinking = evidence[".reasoning_effort"]
+    if thinking is not None and thinking.strip() not in VALID_REASONING_LEVELS:
+        raise ValueError(
+            "Invalid reasoning override; inspect configuration before recovery"
+        )
+    thinking = (
+        thinking.strip() if thinking is not None else preset.get("reasoning_effort")
+    )
+    if thinking is not None and thinking not in VALID_REASONING_LEVELS:
+        raise ValueError("Invalid configured reasoning level")
+    history = json.loads(evidence["chat_history.json"] or "[]")
+    if not isinstance(history, list) or any(
+        not isinstance(item, dict)
+        or not isinstance(item.get("role"), str)
+        or not isinstance(item.get("content"), str)
+        for item in history
+    ):
+        raise ValueError("History cannot be verified; recovery does not repair history")
+    for record in records:
+        expected = {"user": record["message"]}
+        if record["state"] != "indeterminate" and record["outcome"] is not None:
+            body = record["outcome"]["body"]
+            text = body.get("reply", body.get("detail", ""))
+            expected["bot"] = text if isinstance(text, str) else json.dumps(text)
+        for role, content in expected.items():
+            found = [
+                item
+                for item in history
+                if item.get("request_id") == record["id"] and item["role"] == role
+            ]
+            if found and found != [
+                {"role": role, "content": content, "request_id": record["id"]}
+            ]:
+                raise ValueError(
+                    "History conflicts with an operation receipt; recovery will not overwrite it"
+                )
+    overrides = json.loads(evidence[".env_overrides.json"] or "{}")
+    if not isinstance(overrides, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in overrides.items()
+    ):
+        raise ValueError("Invalid environment overrides")
+    effective_environment = dict(os.environ)
+    effective_environment.update(global_env_dict(cfg))
+    preset_environment = preset.get("env_dict", {})
+    if isinstance(preset_environment, dict):
+        effective_environment.update(
+            {
+                key: value
+                for key, value in preset_environment.items()
+                if isinstance(value, str)
+            }
+        )
+    effective_environment.update(overrides)
+    for key, value in effective_environment.items():
+        if (
+            not isinstance(key, str)
+            or not isinstance(value, str)
+            or not key
+            or "=" in key
+            or "\0" in key
+            or "\0" in value
+        ):
+            raise ValueError(
+                "Effective environment contains an illegal process name or value"
             )
-            return send_response(
-                indeterminate_send(
-                    "The Send receipt could not be verified. Check the conversation; it will not be executed automatically."
-                )
+        # Match the process API's filesystem encoding, including surrogateescape.
+        os.fsencode(key)
+        os.fsencode(value)
+    evidence["effective_environment_digest"] = digest(effective_environment)
+    if (path / ".pi").is_symlink() or (path / ".pi/agent").is_symlink():
+        raise ValueError("Pi configuration directory must not be a symlink")
+    settings = read_file(path / ".pi/agent/settings.json")
+    if settings is not None and not isinstance(json.loads(settings), dict):
+        raise ValueError("Invalid Pi settings; inspect configuration before recovery")
+    if (
+        settings is not None
+        and json.loads(settings).get("defaultThinkingLevel") != thinking
+    ):
+        raise ValueError(
+            "Pi thinking setting differs from effective reasoning; inspect configuration before recovery"
+        )
+    evidence["settings"] = settings.decode() if settings is not None else None
+    links = dict(cfg.get("session_symlink_dict", {}))
+    managed = set(links)
+    for other in aliases.values():
+        managed.update(other.get("session_symlink_dict", {}))
+    links.update(preset.get("session_symlink_dict", {}))
+    link_evidence = {}
+    for name in sorted(managed):
+        relative = Path(name)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("Resource path escapes session")
+        link = path / relative
+        if not link.parent.resolve().is_relative_to(path.resolve()):
+            raise ValueError("Resource parent escapes session")
+        expected = (
+            resolve_config_path(str(links[name]), config_dir) if name in links else None
+        )
+        actual = _absolute_link_target(str(link)) if link.is_symlink() else None
+        if actual != expected or (expected is None and os.path.lexists(link)):
+            raise ValueError(
+                f"Resource {name} does not match selected agent; inspect configuration before recovery"
             )
+        link_evidence[name] = {"actual": actual, "expected": expected}
+    model = (
+        (evidence[".model"] or "").strip()
+        or preset.get("model")
+        or cfg.get("pi_agent_model", "auto")
+    )
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("Effective model is invalid")
+    return {
+        "summary": {
+            "agent": agent,
+            "model": model,
+            "reasoning_effort": thinking,
+        },
+        "digest": digest(
+            {
+                "configuration": cfg,
+                "config_dir": config_dir,
+                "files": evidence,
+                "links": link_evidence,
+            }
+        ),
+    }
 
-        if not owner:
-            return send_response(await asyncio.shield(future))
 
-        try:
-            outcome: dict
-            try:
-                reply = await _process_chat(
-                    request.session_id,
-                    request.message,
-                    lease_fd,
-                    request.request_id,
-                )
-                outcome = {"status": 200, "body": {"reply": reply}}
-            except HTTPException as exc:
-                outcome = {
-                    "status": exc.status_code,
-                    "body": {"detail": exc.detail},
-                    "headers": exc.headers or {},
-                }
-            except Exception as exc:
-                logger.exception("Send %s failed for %s", request.request_id, safe_id)
-                outcome = {"status": 500, "body": {"detail": str(exc)}}
-            try:
-                complete_send(path, reservation, outcome)
-            except (OSError, ValueError, TypeError):
-                logger.exception(
-                    "Could not save outcome for Send %s", request.request_id
-                )
-                outcome = indeterminate_send(
-                    "This Send's replay outcome could not be saved. Check the conversation before sending again."
-                )
-            if not future.done():
-                future.set_result(outcome)
-            return send_response(outcome)
-        except asyncio.CancelledError:
-            # Keep the reservation: cancellation does not prove the agent stopped.
-            if not future.done():
-                future.set_result(
-                    indeterminate_send(
-                        "The original Send was interrupted. Check the conversation; it will not be executed again."
-                    )
-                )
-            raise
-        finally:
-            with lifecycle_gate:
-                if active_web_sends.get(key) is future:
-                    del active_web_sends[key]
+class RecoveryRequest(BaseModel):
+    request_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    token: str = Field(pattern=r"^[0-9a-f]{64}$")
+    acknowledge_possible_effects: StrictBool
+
+
+@app.get("/sessions/{session_id}/recovery")
+async def get_recovery(
+    session_id: str,
+    request_id: str | None = Query(default=None, pattern=r"^[0-9a-f]{32}$"),
+):
+    try:
+        return JSONResponse(
+            get_delivery_owner().recovery.status(session_id, request_id=request_id),
+            headers={"Cache-Control": "no-store"},
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        raise HTTPException(
+            409, f"Recovery evidence cannot be verified: {exc}"
+        ) from exc
+
+
+@app.post("/sessions/{session_id}/recovery")
+async def post_recovery(session_id: str, request: RecoveryRequest):
+    if not request.acknowledge_possible_effects:
+        raise HTTPException(
+            422, "Explicit acknowledgement of possible prior effects is required"
+        )
+    try:
+        return JSONResponse(
+            get_delivery_owner().recovery.status(
+                session_id, token=request.token, request_id=request.request_id
+            ),
+            headers={"Cache-Control": "no-store"},
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        raise HTTPException(
+            409, f"Recovery refused; session remains paused: {exc}"
+        ) from exc
+
+
+class OperationRequest(BaseModel):
+    request_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    message: str
+
+
+def operation_error(exc):
+    return send_response(indeterminate_send(str(exc)))
+
+
+@app.post("/sessions/{session_id}/operations")
+async def post_operation(session_id: str, request: OperationRequest):
+    try:
+        record, created = admit_operation(
+            session_id, request.request_id, request.message
+        )
+        return JSONResponse(
+            {"operation": public(record)}, status_code=202 if created else 200
+        )
+    except SendConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (SendIndeterminate, OSError, ValueError) as exc:
+        return operation_error(exc)
+
+
+@app.get("/sessions/{session_id}/operations")
+async def get_operations(session_id: str, request_id: list[str] = Query(default=[])):
+    if len(request_id) > 64 or any(
+        not re.fullmatch(r"[0-9a-f]{32}", value) for value in request_id
+    ):
+        raise HTTPException(400, "Supply at most 64 canonical request IDs")
+    try:
+        from recovery import acknowledged, read_ledger
+
+        owner = get_delivery_owner()
+        records = owner.listing(session_id, request_id)
+        ledger = read_ledger(owner.root, session_id)
+        acknowledged_records = [
+            {"id": record["id"], "revision": record["revision"]}
+            for record in records
+            if record["state"] == "indeterminate"
+            and acknowledged(ledger, record["id"], owner.path(session_id, record["id"]))
+        ]
+        return JSONResponse(
+            {
+                "operations": records,
+                "recovery_required": owner.lane(session_id).paused,
+                "recovery_acknowledged": acknowledged_records,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+    except (SendIndeterminate, OSError, ValueError) as exc:
+        return operation_error(exc)
+
+
+@app.get("/sessions/{session_id}/operations/{request_id}")
+async def get_operation(session_id: str, request_id: str):
+    if not re.fullmatch(r"[0-9a-f]{32}", request_id):
+        raise HTTPException(400, "Invalid request ID")
+    try:
+        return JSONResponse(
+            {"operation": public(get_delivery_owner().lookup(session_id, request_id))},
+            headers={"Cache-Control": "no-store"},
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "Operation not found") from exc
+    except (SendIndeterminate, OSError, ValueError) as exc:
+        return operation_error(exc)
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -1650,7 +1950,8 @@ async def run_notifyme_task(session_id: str, message: str):
     cfg, config_dir = load_config()
     root = Path(get_sessions_dir(cfg, config_dir))
     try:
-        with session_admission(root, sanitize_session_id(session_id)):
+        get_delivery_owner().validate_session(session_id)
+        with session_admission(root, session_id):
             await _run_notifyme_task(session_id, message)
     except HTTPException:
         # A stale background notification must not recreate a trashed session.
@@ -1660,10 +1961,9 @@ async def run_notifyme_task(session_id: str, message: str):
 async def _run_notifyme_task(session_id: str, message: str):
     """Deliver a notification and optionally get an agent response.
 
-    The raw notification is enqueued immediately so it always appears
-    without waiting for session locks. Then we try to acquire the session
-    lock with a short timeout — if free, the agent processes the notification
-    and its response arrives as a follow-up message.
+    Raw delivery does not wait for execution. Optional reasoning is admitted
+    only while the authoritative lane is idle; busy notifications remain raw
+    rather than silently becoming queued agent work.
     """
     safe_id = sanitize_session_id(session_id)
     try:
@@ -1676,11 +1976,10 @@ async def _run_notifyme_task(session_id: str, message: str):
         logger.error(f"Notifyme enqueue failed for {session_id}: {e}")
         return
 
-    # Try to get an agent response, but skip if the session is busy.
-    # Don't acquire the lock ourselves — process_chat handles its own locking,
-    # and asyncio.Lock is not reentrant so holding it here would deadlock.
-    lock = get_session_lock(safe_id)
-    if lock.locked():
+    # The idle check and process_chat admission have no intervening await.
+    # process_chat is an adapter to the same owner, never another executor.
+    owner = get_delivery_owner()
+    if owner.busy(safe_id):
         return  # Active chat in progress, raw notification already delivered.
     try:
         reply_text = await process_chat(session_id, message)
@@ -1700,7 +1999,8 @@ async def _run_notifyme_task(session_id: str, message: str):
 
 @app.post("/sessions/{session_id}/notifyme")
 async def notifyme_session(session_id: str, request: NotifymeRequest):
-    safe_session_id = sanitize_session_id(session_id)
+    get_delivery_owner().validate_session(session_id)
+    safe_session_id = session_id
     # Start the chat asynchronously
     asyncio.create_task(run_notifyme_task(safe_session_id, request.message))
     return {"status": "notifyme_initiated"}

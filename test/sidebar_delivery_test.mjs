@@ -1,103 +1,81 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import vm from 'node:vm';
+import { controller, operation } from './delivery_controller.mjs';
 
-// Execute the real controller's state functions without DOM wiring/startup.
-// Browser coverage exercises the full controller and actual saved receipts.
-async function controller(name) {
-  const source = await readFile(new URL(`../src/ui/${name}.js`, import.meta.url), 'utf8');
-  const start = source.indexOf("\nbyId('new-session-btn').addEventListener");
-  assert.ok(start > 0);
-  const context = vm.createContext({
-    document: { getElementById: () => ({ addEventListener() {} }), addEventListener() {}, visibilityState: 'visible' },
-    window: { matchMedia: () => ({ matches: false }), addEventListener() {} },
-    AbortController, URLSearchParams, setTimeout, clearTimeout,
-  });
-  vm.runInContext(source.slice(0, start), context);
-  vm.runInContext(`
-    let renders = 0, warnings = 0;
-    renderSessions = () => { renders++; };
-    showUnconfirmed = () => {};
-    notice = () => { warnings++; };
-    sessions = [{ id: 'session_a' }, { id: 'session_b' }, { id: 'session_c' }];
-    currentSession = 'session_c'; connected = true; historyReady = true;
-    function submission(id) { return { id, text: 'Preserved text ' + id, needsRecovery: false, accepted: false, settled: false }; }
-  `, context);
-  return code => vm.runInContext(code, context);
-}
+const posts = ui => ui.calls.filter(call => call.options.method === 'POST');
+const gets = ui => ui.calls.filter(call => !call.options.method);
 
-const name = 'follow';
+// Old snapshot-send receipt tests are replaced with public operation-list GETs.
+test('bounded fair offscreen state rotation never requests history or mutates selected activity', async () => {
+    const ui = await controller();
+    for (const id of ['x', 'y']) {
+        await ui.send(id, 'Work in ' + id);
+        posts(ui).at(-1).respond({ operation: operation(posts(ui).at(-1), 'running') }, 202);
+        await ui.flush();
+    }
+    ui.run("currentSession='z'; serverBusy.add('z');");
+    for (let i = 0; i < 4; i++) {
+        ui.run('void syncBackgroundOperations();');
+        await ui.flush();
+        gets(ui).at(-1).respond({ operations: [operation(posts(ui)[i % 2], 'running')] });
+        await ui.flush();
+    }
+    assert.deepEqual(gets(ui).map(call => call.path), ['/sessions/x/operations', '/sessions/y/operations', '/sessions/x/operations', '/sessions/y/operations']);
+    assert.equal(ui.run("currentSession==='z' && serverBusy.has('z') && connected && historyReady && historyCache.size===0"), true);
+});
 
-  test(`${name}: bounded fair offscreen receipt rotation, no unrelated activity/cache mutation`, async () => {
-const run = await controller(name);
-await run(`(async () => {
-  const missing = submission('a0'), later = submission('a1'), failed = submission('b0');
-  unconfirmedSends.set('session_a', [missing, later]); addPending('session_b', failed);
-  serverBusy.add('session_c');
-  let calls = [];
-  api = async path => {
-    const id = new URLSearchParams(path.split('?')[1]).get('request_id'); calls.push(id);
-    return { revision: 'r', busy: false, busy_sessions: [], send: { id,
-      state: id === 'a0' ? 'missing' : 'complete',
-      outcome: id === 'b0' ? { status: 429, body: { detail: 'Refused' } } : { status: 200, body: { reply: 'Saved' } } } };
-  };
-  await syncBackgroundReceipt();
-  if (calls.length !== 1 || renders !== 0) throw Error('Unchanged missing receipt caused extra work/render');
-  await syncBackgroundReceipt(); await syncBackgroundReceipt();
-  if (calls.join(',') !== 'a0,b0,a1') throw Error('Session or saved-ID rotation starved: ' + calls);
-  if (pendingSends.size || unconfirmedSends.get('session_a')?.length !== 1 || unconfirmedSends.get('session_a')[0] !== missing
-      || !unconfirmedSends.get('session_b')?.[0].failed) throw Error('Exact outcomes not preserved');
-  if (!serverBusy.has('session_c') || historyCache.size || currentSession !== 'session_c' || !connected || !historyReady) throw Error('Selected state/cache changed');
-})()`);
-  });
+test('concurrent GETs coalesce; pause cancels, hidden page and late responses cannot reconcile', async () => {
+    const ui = await controller();
+    await ui.send('x', 'work');
+    posts(ui)[0].respond({ operation: operation(posts(ui)[0]) }, 202);
+    await ui.flush();
+    ui.run("currentSession='z'; void syncBackgroundOperations(); void syncBackgroundOperations();");
+    assert.equal(gets(ui).length, 1);
+    ui.run('pauseUpdates();');
+    assert.equal(gets(ui)[0].options.signal.aborted, true);
+    gets(ui)[0].respond({ operations: [operation(posts(ui)[0], 'failed', 2, { outcome: { status: 429, body: { detail: 'late' } } })] });
+    await ui.flush();
+    ui.run("document.visibilityState='hidden'; void syncBackgroundOperations(); currentSession='x'; showUnconfirmed();");
+    assert.equal(gets(ui).length, 1);
+    assert.equal(ui.node('unconfirmed-send').hidden, true);
+});
 
-  test(`${name}: concurrent checks coalesce, pause cancels, late response cannot reconcile`, async () => {
-const run = await controller(name);
-await run(`(async () => {
-  const send = submission('a0'); addPending('session_a', send);
-  let calls = 0, release, signal;
-  api = (path, options) => { calls++; signal = options.signal; return new Promise(resolve => { release = resolve; }); };
-  const first = syncBackgroundReceipt(), second = syncBackgroundReceipt();
-  if (calls !== 1) throw Error('Concurrent extra GETs');
-  pauseUpdates();
-  if (!signal.aborted || activeReceiptCheck !== null || pollTimer !== null || !send.needsRecovery) throw Error('Pause did not cancel lifecycle');
-  release({ revision: 'r', busy: false, send: { id: 'a0', state: 'complete', outcome: { status: 200, body: { reply: 'Saved' } } } });
-  if (await first || await second || !isPending('session_a', send) || renders) throw Error('Cancelled response mutated state');
-  document.visibilityState = 'hidden';
-  await syncBackgroundReceipt();
-  if (calls !== 1) throw Error('Hidden page started extra GET');
-})()`);
-  });
+test('malformed, cross-session and GET errors never imply completion or disconnect selected history', async () => {
+    const ui = await controller();
+    await ui.send('x', 'keep');
+    posts(ui)[0].respond({ operation: operation(posts(ui)[0]) }, 202);
+    await ui.flush();
+    ui.run("currentSession='z';");
+    for (const response of [
+        { operations: [operation(posts(ui)[0], 'succeeded', 2, { session_id: 'y', outcome: { status: 200, body: { reply: 'wrong' } } })] },
+        { operations: [operation(posts(ui)[0], 'succeeded', 2, { outcome: { status: 200, body: {} } })] },
+    ]) {
+        ui.run('void syncBackgroundOperations();');
+        gets(ui).at(-1).respond(response);
+        await ui.flush();
+    }
+    ui.run('void syncBackgroundOperations();');
+    gets(ui).at(-1).reject(new Error('offline'));
+    await ui.flush();
+    assert.equal(ui.run("connected && historyReady && currentSession==='z'"), true);
+    ui.run("currentSession='x'; updateInputState(); showUnconfirmed();");
+    assert.equal(ui.node('typing').textContent, 'Queued');
+    assert.equal(ui.node('unconfirmed-send').hidden, true);
+});
 
-  test(`${name}: malformed/mismatched receipts and GET errors never imply completion`, async () => {
-const run = await controller(name);
-await run(`(async () => {
-  const send = submission('a0'); addPending('session_a', send);
-  api = async () => ({ revision: 'r', busy: false, send: { id: 'other', state: 'complete', outcome: { status: 200, body: { reply: 'Not ours' } } } });
-  await syncBackgroundReceipt();
-  if (!isPending('session_a', send) || deliveryStatus('session_a') !== 'Sending…') throw Error('Wrong ID acknowledged or idle means working');
-  api = async () => ({ revision: 'r', busy: false, send: { id: 'a0', state: 'complete', outcome: { status: 200, body: {} } } });
-  if (await syncBackgroundReceipt()) throw Error('Malformed complete receipt accepted');
-  api = async () => { throw Error('Network unavailable'); };
-  await syncBackgroundReceipt();
-  if (!isPending('session_a', send) || unconfirmedSends.size || !connected || !historyReady || warnings) throw Error('Offscreen error changed selected/delivery state');
-})()`);
-  });
-
-  test(`${name}: changed selection or dismissed candidate wins over an old GET`, async () => {
-const run = await controller(name);
-for (const action of ['currentSession = "session_a"', 'unconfirmedSends.delete("session_a")']) {
-  await run(`(async () => {
-    currentSession = 'session_c';
-    const send = submission('a0'); unconfirmedSends.set('session_a', [send]);
-    let release;
-    api = () => new Promise(resolve => { release = resolve; });
-    const checking = syncBackgroundReceipt();
-    ${action};
-    release({ revision: 'r', busy: false, send: { id: 'a0', state: 'complete', outcome: { status: 429, body: { detail: 'Old failure' } } } });
-    if (await checking || send.failed || warnings || renders) throw Error('Obsolete offscreen reply mutated state');
-    unconfirmedSends.clear();
-  })()`);
-}
-  });
+test('navigation and dismissed candidates win over an old operation GET', async () => {
+    const ui = await controller();
+    await ui.send('x', 'uncertain');
+    posts(ui)[0].reject(new Error('lost'));
+    await ui.flush();
+    ui.run("currentSession='z'; void syncBackgroundOperations(); navigationVersion++; currentSession='x';");
+    gets(ui)[0].respond({ operations: [operation(posts(ui)[0], 'failed', 2, { outcome: { status: 429, body: { detail: 'old' } } })] });
+    await ui.flush();
+    ui.run('showUnconfirmed();');
+    assert.match(ui.node('saved-send-status').textContent, /unknown/);
+    ui.run('void syncOperations(); dismissRecoverable(recoverableForView()); showUnconfirmed();');
+    gets(ui).at(-1).respond({ operations: [operation(posts(ui)[0], 'failed', 2, { outcome: { status: 429, body: { detail: 'dismissed' } } })] });
+    await ui.flush();
+    assert.equal(ui.node('unconfirmed-send').hidden, true);
+    assert.equal(posts(ui).length, 1);
+});

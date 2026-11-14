@@ -18,6 +18,7 @@ from session_lease import SessionLeaseBusy, session_lease
 
 _layout_lock = threading.Lock()
 _LAYOUT_FILE = ".session-layout.json"
+SESSION_STAGING_PREFIX = ".initializing-"
 logger = logging.getLogger(__name__)
 
 
@@ -26,7 +27,11 @@ class InvalidSessionOrder(ValueError):
 
 
 def _session_ids(root: Path) -> list[str]:
-    return sorted(path.name for path in root.iterdir() if path.is_dir())
+    return sorted(
+        path.name
+        for path in root.iterdir()
+        if path.is_dir() and not path.name.startswith(SESSION_STAGING_PREFIX)
+    )
 
 
 def _read(root: Path) -> dict:
