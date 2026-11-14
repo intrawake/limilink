@@ -18,7 +18,7 @@ If a response is lost, inspect `GET /sessions/{sid}/media/{id}`. Same ID plus ma
 
 - This is assistant-to-user publication, **not** a browser upload/model-input pipeline. Publishing does not call an agent, alter prompts/configuration/history or notify Discord. It works while the assistant's existing turn owns the execution fence. Upload/stream leases do count as broad session liveness, without blocking a new explicit chat. Known delivery work is labelled Running/Queued; a busy bit alone is labelled Session busy, not Thinking. The conservative lease probe still detects surviving/unfenced writers.
 - Media is outside the static tree. **The routes have the same access perimeter as Limilink, not separate authentication or secret-link security.** Random IDs do not make links private. Fleet's intended deployment restricts its Tailscale forwarding to the configured laptop and phone; verify the actual perimeter before activation. Do not expose these unauthenticated routes publicly.
-- Each session owns its shelf. Trash blocks new publication/reads; Undo restores it. Existing transfers hold deletion leases until completion/disconnect. Physical whole-session deletion reclaims pins and stages. V1 has no independent unpin/delete or public-share-token feature.
+- Each session owns its shelf. Trash blocks new publication/reads; Undo restores it. Existing transfers hold deletion leases until completion/disconnect. Physical whole-session deletion reclaims pins and stages. Each pin has a confirmed Remove action that removes its published copy, not the original source file. There is no public-share-token feature.
 - No Google Drive, external upload host, media generation, transcoding or provider calls are involved. URLs are relative to the existing Limilink origin, not the CLI's loopback hostname.
 
 ## Limits and formats
@@ -34,6 +34,7 @@ Raw `PUT /sessions/{sid}/media/{32hexid}?filename={display_name}` stages bytes u
 
 - `GET /sessions/{sid}/media`: `{revision, media}`; pass the previous `revision` to receive `{revision, unchanged:true}` when unchanged.
 - `GET /sessions/{sid}/media/{id}`: `{media}` exact observation.
+- `DELETE /sessions/{sid}/media/{id}`: removes a pin with a 204 response; repeated removal is safe. New reads return 404. Already-open transfers can finish. Small metadata tombstones prevent old uploads from resurrecting removed pins (PUT returns 410); publish deliberately again with a new ID. Removed copies no longer count against shelf limits.
 - `GET`/`HEAD /sessions/{sid}/media/{id}/content`: controlled image/audio MIME, exact length, SHA-256 ETag, single byte ranges and safe inline disposition. Add `?download=1` for attachment disposition.
 - GET handles `start-end`, `start-`, `-suffix` ranges, clamps end and returns 416 for unsatisfiable ranges. Malformed/multiple/overlong range headers are ignored with full 200; HEAD ignores Range. Matching If-None-Match yields 304; If-Range requires the exact strong ETag.
 - API/content responses use private no-store and nosniff. No absolute storage paths, client-provided content URLs or secret environment values are returned.

@@ -334,7 +334,7 @@ class MediaStore:
             return []
         items = []
         for name in os.listdir(directory):
-            if re.fullmatch(r"\.stage-[0-9a-f]{32}", name):
+            if re.fullmatch(r"\.(?:stage|removed)-[0-9a-f]{32}", name):
                 continue
             if not re.fullmatch(r"[0-9a-f]{32}", name):
                 fail(409, "Media storage contains an unverified entry")
@@ -361,6 +361,30 @@ class MediaStore:
             if directory is None:
                 fail(404, "Media publication not found")
             return metadata(directory, rid, sid)
+
+    def remove(self, sid, rid):
+        identity(rid)
+        with self.scope(sid) as (_, directory, session), self.gate, self.lock(sid):
+            if directory is None:
+                fail(404, "Media publication not found")
+            removed = ".removed-" + rid
+            with ExitStack() as stack:
+                try:
+                    publication = open_dir(stack, directory, removed)
+                except FileNotFoundError:
+                    publication = open_dir(stack, directory, rid)
+                    metadata_at(publication, rid, sid)
+                    # Atomically hide the pin before reclaiming its copied bytes.
+                    os.rename(rid, removed, src_dir_fd=directory, dst_dir_fd=directory)
+                os.fsync(directory)
+                os.fsync(session)
+                try:
+                    os.unlink("data", dir_fd=publication)
+                except FileNotFoundError:
+                    pass
+                os.fsync(publication)
+                # Retain the small metadata tombstone: an old upload retry must
+                # never resurrect a pin the user explicitly removed.
 
     def content(self, sid, rid, request, download=False):
         identity(rid)
@@ -470,6 +494,19 @@ class MediaStore:
                                     "Service closed before media commit; observe publication ID",
                                 )
                             self.owner.validate_session(sid)
+                            try:
+                                os.stat(
+                                    ".removed-" + rid,
+                                    dir_fd=directory,
+                                    follow_symlinks=False,
+                                )
+                            except FileNotFoundError:
+                                pass
+                            else:
+                                fail(
+                                    410,
+                                    "This pin was removed; use a new publication ID",
+                                )
                             items = self.records(directory, sid)
                             old = next(
                                 (item for item in items if item["id"] == rid), None

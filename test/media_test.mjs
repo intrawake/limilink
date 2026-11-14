@@ -10,6 +10,7 @@ async function shelf() {
         append(...nodes) { this.appendCalls++; for(const node of nodes){node.parent=this;this.children.push(node);} }
         insertBefore(node, next) { this.appendCalls++; node.parent=this; const index=this.children.indexOf(next); this.children.splice(index<0?this.children.length:index,0,node); }
         replaceChildren(...nodes) { this.children=[];this.append(...nodes); }
+        addEventListener(type, callback){this['on'+type]=callback;}
         setAttribute(key,value){this[key]=value;}
         focus(){document.activeElement=this;}
         remove() { if(this.parent)this.parent.children=this.parent.children.filter(node=>node!==this); }
@@ -23,7 +24,9 @@ async function shelf() {
     const events=[];
     const document={visibilityState:'visible',getElementById:node,createElement:tag=>new Node(tag),dispatchEvent:event=>events.push(event)};
     const overlay={matches:false};
+    const confirms=[];
     const context=vm.createContext({document,currentSession:'x',AbortController,
+        confirm:message=>{confirms.push(message);return context.acceptRemoval !== false;},
         matchMedia:()=>overlay,mobile:{matches:false},app:{classList:{contains:()=>false}},
         CustomEvent:class {constructor(type,options){this.type=type;this.detail=options.detail;}},
 
@@ -36,7 +39,7 @@ async function shelf() {
     const run=code=>vm.runInContext(code,context);
     run('shelf = new SessionMediaShelf(); shelf.changed();');
     const flush=async()=>{for(let i=0;i<12;i++)await Promise.resolve();};
-    return {node,calls,run,flush,timers,document,overlay,events};
+    return {node,calls,run,flush,timers,document,overlay,events,confirms};
 }
 function item(id='1',sid='x',extra={}) {
     id=id.repeat(32);
@@ -136,6 +139,43 @@ test('display-name limit counts Unicode code points like the server',async()=>{
     c.calls[0].respond(snapshot([item('1','x',{name})]));await c.flush();
     assert.equal(c.run('shelf.cards.size'),1);
     assert.equal(c.run("shelf.cards.get('1'.repeat(32)).item.name"),name);
+});
+
+test('removal requires confirmation, stops only that audio and refreshes the count',async()=>{
+    const c=await shelf();c.calls[0].respond(snapshot([item(),item('2')]));await c.flush();
+    const card=c.run("shelf.cards.get('1'.repeat(32))");
+    const other=c.run("shelf.cards.get('2'.repeat(32))");other.player.currentTime=19;
+    c.run("acceptRemoval=false");card.remove.onclick();await c.flush();
+    assert.equal(c.calls.length,1);assert.equal(c.run('shelf.cards.size'),2);
+    c.run("acceptRemoval=true");card.remove.focus();card.remove.onclick();card.remove.onclick();
+    assert.equal(c.calls.length,2);assert.equal(card.remove.disabled,true);
+    assert.equal(c.calls[1].options.method,'DELETE');
+    assert.equal(c.calls[1].path,'/sessions/x/media/'+'1'.repeat(32));
+    c.calls[1].respond(null,204);await c.flush();
+    assert.equal(c.run('shelf.cards.size'),1);assert.equal(card.player.pauses,1);
+    assert.equal(other.player.currentTime,19);assert.equal(other.player.pauses,0);
+    assert.equal(c.node('media-toggle').textContent,'Pins (1)');
+    assert.equal(c.document.activeElement,c.node('media-close'));
+    c.calls[2].respond(snapshot([item('2')],'b'));await c.flush();
+    assert.equal(c.run('shelf.revision'),'b'.repeat(64));
+});
+
+test('removal failures keep the pin; stale listings and navigation cannot restore it',async()=>{
+    const c=await shelf();c.calls[0].respond(snapshot([item()]));await c.flush();
+    const card=c.run("shelf.cards.get('1'.repeat(32))");
+    card.remove.onclick();c.calls[1].respond({detail:'busy'},409);await c.flush();
+    assert.equal(c.run('shelf.cards.size'),1);assert.equal(card.remove.disabled,false);
+    assert.match(c.node('media-status').textContent,/Removal not confirmed: busy/);
+    c.run('void shelf.refresh()');const stale=c.calls[2];
+    card.remove.onclick();c.calls[3].respond(null,204);await c.flush();
+    stale.respond(snapshot([item()]));await c.flush();
+    assert.equal(c.run('shelf.cards.size'),0);
+    c.calls[4].respond(snapshot([item('2')],'b'));await c.flush();
+    c.run("shelf.cards.get('2'.repeat(32)).remove.onclick(); currentSession='y';shelf.changed();currentSession='x';shelf.changed();");
+    c.calls[7].respond(snapshot([item('3')],'c'));await c.flush();
+    c.calls[5].respond(null,204);await c.flush();
+    assert.equal(c.run("shelf.cards.has('3'.repeat(32))"),true);
+    assert.equal(c.calls.length,8);
 });
 
 test('hidden pages do not poll; timeout changes only the shelf status',async()=>{

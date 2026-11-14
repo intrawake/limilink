@@ -29,7 +29,7 @@ except ImportError:
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, StrictBool, field_validator
 from session_media import MediaStore, PRIVATE as MEDIA_HEADERS
 
@@ -1901,6 +1901,13 @@ async def list_media(
         return JSONResponse(
             get_media_store().listing(session_id, revision), headers=MEDIA_HEADERS
         )
+
+
+@app.delete("/sessions/{session_id}/media/{publication_id}", status_code=204)
+async def remove_media(session_id: str, publication_id: str):
+    with media_errors():
+        get_media_store().remove(session_id, publication_id)
+        return Response(status_code=204, headers=MEDIA_HEADERS)
 
 
 @app.get("/sessions/{session_id}/media/{publication_id}")

@@ -10,6 +10,7 @@
 #media-items figcaption { margin: 6px 0; overflow-wrap: anywhere; }
 #media-items small { display: block; margin: 6px 0; color: var(--muted); }
 #media-items a { color: #9cbcff; }
+#media-items .media-actions { display: flex; align-items: center; gap: 12px; }
 #media-backdrop { position: fixed; inset: 0; z-index: 11; background: #080a0eb3; border: none; }
 @media (max-width: 1180px) {
     #session-media { position: fixed; inset: 0 0 0 auto; z-index: 12; width: min(400px, calc(100vw - 32px)); }

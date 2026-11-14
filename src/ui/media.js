@@ -1,6 +1,6 @@
 'use strict';
 
-// A read-only session panel. It never sends chat, changes drafts or calls a model.
+// Session pins never send chat, change drafts or call a model.
 class SessionMediaShelf {
     constructor() {
         this.panel = document.getElementById('session-media');
@@ -87,8 +87,15 @@ class SessionMediaShelf {
         }
         const download = document.createElement('a');
         download.href = item.download_url; download.download = item.name; download.textContent = 'Download';
-        node.append(title, download);
-        return {node, player, item};
+        const remove = document.createElement('button');
+        remove.type = 'button'; remove.className = 'quiet-button'; remove.textContent = 'Remove';
+        remove.setAttribute('aria-label', `Remove pin ${item.name}`);
+        const card = {node, player, item, remove};
+        remove.addEventListener('click', () => { void this.remove(card); });
+        const actions = document.createElement('div'); actions.className = 'media-actions';
+        actions.append(download, remove);
+        node.append(title, actions);
+        return card;
     }
     render(items) {
         const sorted = [...items].sort((a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id));
@@ -105,6 +112,36 @@ class SessionMediaShelf {
         this.summary.textContent = `Pins (${items.length})`;
         this.toggle.textContent = `Pins (${items.length})`;
         this.status.textContent = items.length ? '' : 'No pins yet.';
+    }
+    async remove(card) {
+        const id = this.session, generation = this.generation;
+        if (card.remove.disabled || !confirm(`Remove pin “${card.item.name}”? The original source file is not deleted.`)) return;
+        const focused = document.activeElement === card.remove;
+        card.remove.disabled = true;
+        // Invalidate any older listing so it cannot restore the removed card.
+        this.cancel();
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 8000);
+        const owned = () => this.session === id && this.generation === generation;
+        try {
+            const response = await fetch(`/sessions/${encodeURIComponent(id)}/media/${card.item.id}`, {method:'DELETE',signal:controller.signal});
+            if (!response.ok) {
+                const data = await response.json();
+                throw Error(typeof data.detail === 'string' ? data.detail : 'Remove request failed.');
+            }
+            if (!owned()) return;
+            this.cancel();
+            const restoreFocus = document.activeElement === card.remove || (focused && document.activeElement === document.body);
+            this.render([...this.cards.values()].filter(other => other !== card).map(other => other.item));
+            this.revision = null;
+            if (restoreFocus) this.close.focus({preventScroll:true});
+            void this.refresh();
+        } catch (error) {
+            if (owned()) this.status.textContent = `Removal not confirmed: ${controller.signal.aborted ? 'check timed out' : error.message}`;
+        } finally {
+            clearTimeout(timeout);
+            if (owned()) card.remove.disabled = false;
+        }
     }
     async refresh() {
         if (!this.session || this.request || document.visibilityState !== 'visible') return;

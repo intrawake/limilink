@@ -341,7 +341,7 @@ function renderSessions() {
         if (isWorking(session.id)) badge('⏳', 'session-working', 'Working');
         if (replies?.isUnread(session.id)) badge('New', 'session-unread', 'Unread reply');
         const delivery = deliveryStatus(session.id);
-        if (delivery) badge(delivery, 'session-delivery', delivery);
+        if (delivery && delivery !== 'Running') badge(delivery, 'session-delivery', delivery);
         if (status.childNodes.length) link.append(status);
         link.addEventListener('click', event => {
             if (namePress?.active || (releaseClick && event.detail)) { event.preventDefault(); return; }
