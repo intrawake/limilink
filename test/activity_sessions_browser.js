@@ -11,8 +11,8 @@ async page => {
         sessionTracking: { available: true, limited: false }, context: null, tools: [],
         nodes: [
             { id: 'parent', parentId: null, label: 'Main agent', kind: 'agent', state: 'working' },
-            { id: child, parentId: 'parent', label: 'Child session aaaaaaaa', kind: 'agent', state: 'working', model: 'actual/response', lastInputTokens: 30000, currentTool: 'read', observation: { ...observation } },
-            { id: nested, parentId: child, label: 'Child session bbbbbbbb', kind: 'agent', state: 'idle', model: 'selected/model', observation: { ...observation, modelBasis: 'selected', omitted: 0 } },
+            { id: child, parentId: 'parent', label: 'Child session aaaaaaaa', kind: 'agent', agent:'specialist', thinking:'max', state: 'working', model: 'actual/response', lastInputTokens: 30000, currentTool: 'read', progress:{text:'Checked <img src=x onerror=window.progressXSS=true> · parser fixtures',at:now-65000}, observation: { ...observation } },
+            { id: nested, parentId: child, label: 'Child session bbbbbbbb', kind: 'agent', agent:'staff', thinking:'off', state: 'idle', model: 'selected/model', observation: { ...observation, modelBasis: 'selected', omitted: 0 } },
             { id: native, parentId: 'parent', label: 'worker', kind: 'agent', state: 'running', model: 'launch/model' },
             { id: 'async:workflow', parentId: 'parent', label: 'workflow', kind: 'workflow', state: 'running' },
             { id: 'async:step', parentId: 'async:workflow', label: 'step', kind: 'step', state: 'complete' }
@@ -40,22 +40,32 @@ async page => {
     const chat = await page.locator('.message').first().elementHandle();
     await page.locator('#activity-toggle').click();
     await page.locator(`[data-id="${child}"]`).waitFor();
-    check((await page.locator('#activity-status').innerText()).includes('Observed Pi sessions'), 'Session view provenance missing');
+    check((await page.locator('#activity-status').innerText()).startsWith('Live · '), 'Live state missing');
+    check(await page.locator('.activity-heading p').count() === 0, 'Activity subheading returned');
+    check(!(await page.locator('#activity-panel').innerText()).match(/Observed Pi sessions|Current observations|Pi estimate, not an exact token count/), 'Redundant UI copy returned');
     check(await page.locator('.activity-node[data-id^="async:"]').count() === 0, 'Native run/workflow/step boxes visible');
     check(await page.locator('.activity-node').count() === 3, 'Observed sessions or parent hidden');
+    check(await page.locator(`[data-id="${child}"] strong span`).first().innerText() === 'specialist', 'Child role missing');
+    check((await page.locator(`[data-id="${child}"] .activity-model`).innerText()).startsWith('max · '), 'Thinking level missing');
+    check((await page.locator(`[data-id="${child}"] .activity-progress time`).innerText()).includes('1m ago'), 'Progress age missing');
+    check(await page.locator('#activity-graph img').count() === 0 && !await page.evaluate(()=>window.progressXSS), 'Progress became HTML');
+    check(await page.locator(`[data-id="${nested}"] .activity-progress`).count() === 0, 'Sibling borrowed progress');
     check(await page.locator('#activity-detail [data-edge="native-edge"]').count() === 0, 'Hidden native report remains in Connections');
     check(sample.nodes.some(node => node.id === native) && sample.events.some(row => row.id === 'native-total'), 'Source native records mutated');
     check((await page.locator(`[data-id="${child}"]`).innerText()).includes('Last response model: actual/response'), 'Actual model provenance missing');
     check((await page.locator(`[data-id="${nested}"]`).innerText()).includes('Selected model:'), 'Selected model presented as actual response');
     await page.locator('#activity-events summary').click();
     await page.locator(`[data-id="${child}"]`).click();
-    check((await page.locator('#activity-detail').innerText()).includes('parent UUID and current delegation are not established'), 'Ancestry overclaimed');
-    check((await page.locator('#activity-detail').innerText()).includes('historical, not current occupancy'), 'Input measurement overclaimed');
+    check((await page.locator('#activity-detail').innerText()).includes('Selected thinking max'), 'Thinking selection basis missing');
+    check((await page.locator('#activity-detail').innerText()).includes(sample.nodes[1].progress.text), 'Full progress not inspectable');
+    check((await page.locator('#activity-detail').innerText()).includes('Parent Historical parent-file link'), 'Historical ancestry mislabeled');
+    check((await page.locator('#activity-detail').innerText()).includes('Context Last input ~30K · capacity unknown'), 'Historical input presented as current context');
     check(await page.locator('#activity-events [data-event-id="parent-event"]').count() === 0, 'Borrowed parent history');
     check(await page.locator('#activity-events [data-event-id="native-total"]').count() === 0, 'Borrowed native totals');
     check((await page.locator('#activity-events').innerText()).includes('earlier/model'), 'Response row borrowed card model');
-    check((await page.locator('#activity-events').innerText()).includes('outside the retained history'), 'Omission hidden');
+    check((await page.locator('#activity-events').innerText()).includes('older events omitted'), 'Omission hidden');
     check(await page.locator('[data-event-id="outer"] > ol > [data-event-id="inner"]').count() === 1, 'Explicit child tool nesting lost');
+    check(await page.evaluate(id=>{const card=document.querySelector(`[data-id="${id}"]`), next=card.nextElementSibling;return card.offsetHeight===152&&parseFloat(next.style.top)>=parseFloat(card.style.top)+card.offsetHeight;},child), 'Progress card overlaps its sibling');
     await page.locator('#activity-detail button').first().click();
     check((await page.locator('.activity-edge-detail').innerText()).includes('ancestry:'), 'Header link looks like delegation');
     await page.locator(`[data-id="${child}"]`).focus();
@@ -69,7 +79,8 @@ async page => {
     await page.waitForFunction(id => document.querySelector(`[data-id="${id}"]`).textContent.includes('observer stale'), child);
     sample.nodes[1].observation.status = 'closed'; sample.nodes[1].state = 'closed'; delete sample.nodes[1].observation.invalidated;
     sample.sessionTracking.limited = true; await refresh();
-    await page.waitForFunction(() => document.querySelector('#activity-events').textContent.includes('does not establish native task success'));
+    await page.waitForFunction(id => document.querySelector(`[data-id="${id}"]`).dataset.state === 'closed', child);
+    check((await page.locator('#activity-detail').innerText()).includes('Status closed'), 'Closed session mislabeled as success');
     check((await page.locator('#activity-status').innerText()).includes('Observation limit reached'), 'Global limits hidden');
     await page.locator('[data-id="parent"]').click();
     check(await page.locator('#activity-detail [data-edge="native-edge"]').count() === 0, 'Native connection leaked after refresh');
@@ -87,6 +98,12 @@ async page => {
     check(await page.locator('#activity-panel').getAttribute('role') === 'dialog', 'Phone modal missing');
     await page.locator(`[data-id="${nested}"]`).click();
     check((await page.locator('#activity-events').innerText()).includes('nested/model'), 'Nested session history absent');
+    await page.locator(`[data-id="${child}"]`).click();
+    check(await page.locator(`[data-id="${child}"] .activity-progress`).isVisible(), 'Phone progress inaccessible');
+    sample.nodes[1].progress = null; delete sample.nodes[1].agent; delete sample.nodes[1].thinking; await refresh();
+    await page.waitForFunction(id=>!document.querySelector(`[data-id="${id}"] .activity-progress`),child);
+    check(await page.locator(`[data-id="${child}"] strong span`).first().innerText()==='Child session aaaaaaaa','Missing role evidence did not fall back');
+    check(await page.locator(`[data-id="${child}"]`).evaluate(node=>node.offsetHeight===108), 'Removed progress left an oversized card');
     check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'Phone horizontal page overflow');
     await page.locator('#activity-close').click();
     check(await page.locator('#message-input').inputValue() === 'Keep session tracking draft', 'Draft changed');

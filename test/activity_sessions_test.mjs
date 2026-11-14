@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, readdirSync, rmSync, unlinkSync, symlinkSync, chmodSync, statSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, readdirSync, mkdirSync, rmSync, unlinkSync, symlinkSync, chmodSync, statSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { CHILD_LIMIT, installChildObserver, slotName } from '../tool/activity-child.mjs';
 import { createSessionStore, createSessionTracking, readPrivateJSON, sessionEventTail } from '../tool/activity-sessions.mjs';
 import { keyedIdFor } from '../tool/activity-metadata.mjs';
+import { createRoleBindings } from '../tool/activity-bindings.mjs';
 import { installActivityBridge } from '../tool/activity-bridge.mjs';
 
 function fixture(t) {
@@ -16,16 +17,17 @@ function fixture(t) {
   const config = { directory, token, rootKey: keyedIdFor(token, 'session', parentFile, parentUUID), rootFileKey: keyedIdFor(token, 'file', parentFile) };
   let clock = 1700000000000;
   const store = createSessionStore(config, { now: () => clock });
-  const runtimes = [];
+  const runtimes = [], bus = new Map();
   const runtime = (file = '/PRIVATE-child/session.jsonl', uuid = 'child-sdk-uuid', parent = parentFile, extra = {}) => {
     const handlers = new Map(), timers = new Map();
     const ctx = { file, uuid, parent, model: { id: 'selected/model' },
       sessionManager: { getSessionFile: () => ctx.file, getSessionId: () => ctx.uuid, getHeader: () => ({ parentSession: ctx.parent }),
         getEntries() { throw new Error('Journals forbidden'); }, getBranch() { throw new Error('Journals forbidden'); } },
       getContextUsage: () => ({ tokens: 30, contextWindow: 100, percent: 30 }) };
-    const pi = { on(event, handler) { handlers.set(event, handler); return () => handlers.delete(event); } };
+    const pi = { on(event, handler) { handlers.set(event, handler); return () => handlers.delete(event); },
+      events:{on(event,fn){if(!bus.has(event))bus.set(event,new Set());bus.get(event).add(fn);return()=>bus.get(event).delete(fn);}} }; 
     installChildObserver(pi, config, { now: () => clock, setInterval(fn) { const id = Symbol(); timers.set(id, fn); return id; }, clearInterval(id) { timers.delete(id); }, ...extra });
-    const api = { ctx, handlers, timers, emit(event, data = {}) { handlers.get(event)?.(data, ctx); } };
+    const api = { ctx, handlers, timers, emit(event, data = {}) { handlers.get(event)?.(data, ctx); }, emitBus(event,data){for(const fn of bus.get(event)??[])fn(data);} }; 
     runtimes.push(api); return api;
   };
   return { config, store, runtime, runtimes, directory, parentFile, parentUUID,
@@ -53,6 +55,104 @@ test('child factory is inert; exact SDK file+UUID identity and metadata-only anc
   assert.equal(statSync(join(f.directory, slotName(0))).mode & 0o777, 0o600);
   r.emit('session_shutdown'); assert.equal(r.timers.size, 0);
   f.advance(); assert.equal(f.project().nodes[0].state, 'closed');
+});
+
+test('thinking is sampled from the exact runtime and successful supervisor progress stays child-owned', t => {
+  const f = fixture(t), a = f.runtime('/a', 'a'), b = f.runtime('/b', 'b');
+  a.ctx.thinkingLevel = 'high'; b.ctx.thinkingLevel = 'off';
+  a.emit('session_start'); b.emit('session_start');
+  a.emit('tool_result', { toolCallId:'progress-a', toolName: 'contact_supervisor', isError: false,
+    input: { reason: 'progress_update', message: '\u001b[31mChecking the parser\u001b[0m\nPRIVATE second line' } });
+  let p = f.project();
+  assert.deepEqual(p.nodes.map(node => node.thinking), ['high', 'off']);
+  assert.deepEqual(p.nodes[0].progress, {text:'Checking the parser', at:1700000000000});
+  assert.equal(p.nodes[1].progress, undefined);
+  const unchanged = {toolName:'read', isError:false};
+  Object.defineProperty(unchanged, 'input', {get(){throw Error('General tool input must not be read');}});
+  a.emit('tool_result', unchanged);
+  for (const [reason, isError] of [['need_decision',false],['interview_request',false],['progress_update',true]]) {
+    a.emit('tool_result', {toolCallId:'other-'+reason,toolName:'contact_supervisor',isError,input:{reason,message:'PRIVATE rejected'}});
+  }
+  a.emit('thinking_level_select', {level:'max'}); f.advance(2000, true);
+  p = f.project(); assert.equal(p.nodes[0].thinking, 'high', 'Heartbeat samples runtime, not a stale event');
+  assert.equal(p.nodes[0].progress.at, 1700000000000, 'Heartbeat cannot refresh the report timestamp');
+  a.emit('tool_result',{toolCallId:'progress-a',toolName:'contact_supervisor',isError:false,input:{reason:'progress_update',message:'duplicate'}});
+  f.advance();assert.equal(f.project().nodes[0].progress.at,1700000000000,'Duplicate callback cannot refresh progress');
+  assert.ok(!JSON.stringify(p).includes('PRIVATE'));
+  a.ctx.thinkingLevel = 'low'; a.emit('thinking_level_select', {level:'low'}); f.advance();
+  assert.equal(f.project().nodes[0].thinking, 'low');
+  a.emit('session_shutdown'); f.advance();
+  assert.equal(f.project().nodes[0].progress.text, 'Checking the parser');
+});
+
+test('progress is bounded and conflict/replacement cannot borrow another observer update', t => {
+  const f = fixture(t), a = f.runtime(); a.ctx.thinkingLevel='high'; a.emit('session_start');
+  a.emit('tool_result', {toolCallId:'progress',toolName:'contact_supervisor',isError:false,input:{reason:'progress_update',message:'🎵'.repeat(1000)}});
+  assert.equal([...f.project().nodes[0].progress.text].length, 280);
+  const b = f.runtime(); b.emit('session_start'); f.advance();
+  let node=f.project().nodes[0]; assert.equal(node.observation.status,'conflict');
+  assert.equal(node.progress,undefined); assert.equal(node.thinking,undefined);
+  a.emit('session_shutdown'); f.advance();
+  node=f.project().nodes[0]; assert.equal(node.progress,undefined, 'A fresh active observer cannot inherit an older report');
+  const raw=f.source(1); raw.progress={text:'bad\nPRIVATE',at:raw.updatedAt}; raw.thinking='invented'; f.replace(raw,1); f.advance();
+  node=f.project().nodes[0]; assert.equal(node.progress,undefined); assert.equal(node.thinking,undefined);
+});
+
+test('root role facts enrich only existing exact files; ambiguous UUIDs and conflicting roles stay generic', t => {
+  const f=fixture(t),a=f.runtime('/a','a'),b=f.runtime('/b','b');a.emit('session_start');b.emit('session_start');
+  const roles=createRoleBindings({token:f.config.token,file:f.parentFile,uuid:f.parentUUID});
+  const send=results=>roles.tool({toolName:'subagent',partialResult:{details:{runId:'run',results}}},true);
+  send([{index:2,agent:'staff',sessionFile:'/b'},{index:0,agent:'specialist',sessionFile:'/a'},{index:3,agent:'staff',sessionFile:'/unobserved'}]);
+  let p=f.store.project(63,roles.snapshot());
+  assert.equal(p.nodes.length,2);assert.deepEqual(p.nodes.map(node=>node.agent),['specialist','staff']);
+  const duplicate=f.runtime('/a','different-uuid');duplicate.emit('session_start');f.advance();
+  p=f.store.project(63,roles.snapshot());assert.equal(p.nodes.filter(node=>node.agent==='specialist').length,0);
+  send([{index:4,agent:'trainee',sessionFile:'/b'}]);f.advance();
+  p=f.store.project(63,roles.snapshot());assert.ok(p.nodes.every(node=>node.agent===undefined));
+});
+
+test('role contradictions survive duplicate observers, closure, replacement and loss of retained source slots',t=>{
+  const f=fixture(t),delegator=f.runtime('/delegator','d'),target=f.runtime('/target','t');
+  delegator.emit('session_start');target.emit('session_start');
+  delegator.emit('tool_result',{toolName:'subagent',details:{runId:'nested',results:[{index:0,agent:'staff',sessionFile:'/target'}]}});
+  const roles=createRoleBindings({token:f.config.token,file:f.parentFile,uuid:f.parentUUID});
+  roles.tool({toolName:'subagent',result:{details:{runId:'root',results:[{index:0,agent:'specialist',sessionFile:'/target'}]}}});
+  const project=()=>f.store.project(63,roles.snapshot());
+  assert.equal(project().nodes.find(node=>node.id===f.source(1).sessionKey).agent,undefined);
+  const duplicate=f.runtime('/delegator','d');duplicate.emit('session_start');f.advance();
+  assert.ok(project().nodes.every(node=>node.agent===undefined),'Observer ambiguity must not erase adverse role evidence');
+  delegator.emit('session_shutdown');duplicate.emit('session_shutdown');f.advance();
+  const replacement=f.runtime('/delegator','d');replacement.emit('session_start');f.advance();
+  assert.ok(project().nodes.every(node=>node.agent===undefined),'A fresh empty collector must not erase a contradiction');
+  const retained=f.store.bindingEvidence();
+  for(const slot of [0,2,3])unlinkSync(join(f.directory,slotName(slot)));
+  const restarted=createSessionStore(f.config);
+  assert.ok(restarted.project(63,retained).nodes.every(node=>node.agent===undefined),'Private retained evidence must survive source reclamation');
+});
+
+test('progress continues beyond the recent callback deduplication window',t=>{
+  const f=fixture(t),r=f.runtime();r.emit('session_start');
+  for(let i=0;i<300;i++){f.advance(1);r.emit('tool_result',{toolCallId:'p'+i,toolName:'contact_supervisor',isError:false,input:{reason:'progress_update',message:'Update '+i}});}
+  assert.equal(f.source().progress.text,'Update 299');
+  r.emit('tool_result',{toolCallId:'p298',toolName:'contact_supervisor',isError:false,input:{reason:'progress_update',message:'replayed'}});
+  assert.equal(f.source().progress.text,'Update 299','Recent duplicates are still suppressed');
+});
+
+test('a nested observer binds its delegated child, never itself or a header ancestor', t => {
+  const f=fixture(t),a=f.runtime('/a','a'),b=f.runtime('/b','b','/a');a.emit('session_start');b.emit('session_start');
+  a.emit('tool_result',{toolName:'subagent',details:{runId:'nested',results:[{index:0,agent:'trainee',sessionFile:'/b'}]}});
+  const p=f.project();assert.equal(p.nodes[0].agent,undefined);assert.equal(p.nodes[1].agent,'trainee');
+  assert.ok(!JSON.stringify(p).includes('/a')&&!JSON.stringify(p).includes('/b'));
+});
+
+test('a nested background launch binds through only its own declared status artifact', t => {
+  const f=fixture(t),a=f.runtime('/a','a'),b=f.runtime('/b','b','/a');a.emit('session_start');b.emit('session_start');
+  const run=join(f.directory,'async-run');mkdirSync(run,{mode:0o700});
+  writeFileSync(join(run,'status.json'),JSON.stringify({lifecycleArtifactVersion:3,runId:'nested-bg',sessionId:'/a',state:'running',steps:[{agent:'staff',sessionFile:'/b'}]}),{mode:0o600});
+  a.emitBus('subagent:async-started',{id:'nested-bg',sessionId:'/a',asyncDir:run});f.advance(2000,true);
+  let p=f.project();assert.equal(p.nodes[0].agent,undefined);assert.equal(p.nodes[1].agent,'staff');
+  a.emit('session_shutdown');f.advance();
+  p=f.project();assert.equal(p.nodes[1].agent,'staff','Closed owning collector retains explicit role evidence');
 });
 
 test('no parent/file/UUID identity means unsupported, not a guessed root link', t => {
@@ -279,6 +379,40 @@ test('registration uses public UUID, preserves bootstrap/owner and declines a ch
   ctx.sessionManager.getSessionId = () => 'different-root'; assert.equal(await setup(), null); assert.equal(readFileSync(bootstrap, 'utf8'), code);
   ctx.sessionManager.getSessionId = () => f.parentUUID;
   assert.equal(await createSessionTracking(ctx, join(f.directory, '.activity.json'), { register() { throw new Error('Other owner'); } }), null);
+});
+
+test('root role evidence survives observer recreation without scanning or publishing private bindings', async t => {
+  const f=fixture(t),ctx={sessionManager:{getSessionFile:()=>f.parentFile,getSessionId:()=>f.parentUUID}};
+  let bootstrap;
+  const register=({extensions})=>{bootstrap=extensions[0].path;return{dispose(){}};};
+  const activity=join(f.directory,'.activity.json');let clock=Date.now();
+  const options={register,now:()=>clock};
+  let tracking=await createSessionTracking(ctx,activity,options);assert.ok(tracking);
+  const handlers=new Map(),timers=new Set();
+  const pi={on(event,handler){handlers.set(event,handler);return()=>handlers.delete(event);}};
+  const config=JSON.parse(readFileSync(bootstrap,'utf8').match(/installChildObserver\(pi,(\{.*\})\);/)[1]);
+  const r=f.runtime();
+  installChildObserver(pi,config,{setInterval(fn){timers.add(fn);return fn;},clearInterval(fn){timers.delete(fn);}});
+  handlers.get('session_start')({},r.ctx);
+  tracking.tool({toolName:'subagent',partialResult:{details:{runId:'root',results:[{index:0,agent:'specialist',sessionFile:r.ctx.file}]}}},true);
+  let p=tracking.project();assert.equal(p.nodes[0].agent,'specialist');
+  assert.ok(!JSON.stringify(p).includes('PRIVATE')&&!JSON.stringify(p).includes(config.token));
+  tracking.dispose();tracking=await createSessionTracking(ctx,activity,options);
+  p=tracking.project();assert.equal(p.nodes[0].agent,'specialist');
+  const adverse=createRoleBindings({token:config.token,file:'/delegator',uuid:'delegator'});
+  adverse.tool({toolName:'subagent',result:{details:{runId:'other',results:[{index:0,agent:'staff',sessionFile:r.ctx.file}]}}});
+  const closed={...JSON.parse(readFileSync(join(config.directory,slotName(0)),'utf8')),
+    instance:randomUUID(),sessionKey:keyedIdFor(config.token,'session','/delegator','delegator'),
+    fileKey:keyedIdFor(config.token,'file','/delegator'),uuidKey:keyedIdFor(config.token,'uuid','delegator'),
+    parentKey:config.rootFileKey,state:'closed',revision:1,updatedAt:clock-6*60*1000,records:[],...adverse.snapshot()};
+  const evidencePath=join(config.directory,slotName(1));writeFileSync(evidencePath,JSON.stringify(closed),{mode:0o600});
+  writeFileSync(join(config.directory,'.bindings.json.tmp'),'simulated crash remnant',{mode:0o600});clock+=2000;
+  p=tracking.project();assert.ok(p.nodes.every(node=>node.agent===undefined));
+  assert.ok(existsSync(evidencePath),'Failed ledger write must not reclaim contradictory source evidence');
+  tracking.dispose();tracking=await createSessionTracking(ctx,activity,options);
+  p=tracking.project();assert.ok(p.nodes.every(node=>node.agent===undefined),'Recreation must not resurrect the old winning role');
+  assert.equal(existsSync(evidencePath),false,'Successful durable merge permits closed-slot reclamation');
+  handlers.get('session_shutdown')({},r.ctx);tracking.dispose();assert.equal(timers.size,0);
 });
 
 test('unsafe directory/modes and partial observer installation fail softly', t => {

@@ -91,7 +91,7 @@ export function installActivityBridge(pi, options = {}) {
   const schedule = options.setInterval ?? setInterval;
   const unschedule = options.clearInterval ?? clearInterval;
   const write = options.write ?? writeAtomicSnapshot;
-  let ctx, sessionId, packageSession, timer, pending, childOff, generation = 0, active = false, invalidContext = false, tracking;
+  let ctx, sessionId, packageSession, timer, pending, childOff, startedOff, generation = 0, active = false, invalidContext = false, tracking;
   // Source-only opt-in until separately approved deployment/backend activation.
   const trackingRequested = env.LIMILINK_ACTIVITY_CHILD_SESSIONS === '1';
   let state = 'idle', model = null, context = null, graph = { nodes: [], edges: [], eligibleRoots: new Set() };
@@ -258,6 +258,7 @@ export function installActivityBridge(pi, options = {}) {
   const stop = () => {
     generation++;
     childOff?.(); childOff = undefined;
+    startedOff?.(); startedOff = undefined;
     try { tracking?.dispose(); } catch { /* fail soft */ } tracking = undefined;
     childFacts.clear();
     if (timer !== undefined) unschedule(timer);
@@ -294,7 +295,11 @@ export function installActivityBridge(pi, options = {}) {
       return Promise.resolve().then(() => setup(candidate, path, { now, ...(options.registerChildExtensions ? { register: options.registerChildExtensions } : {}) }))
         .then(result => {
           if (!active || generation !== ownerGeneration) { result?.dispose(); return; }
-          tracking = result; publish();
+          tracking = result;
+          startedOff = pi.events.on('subagent:async-started', data => {
+            if (active && generation === ownerGeneration) { try { tracking?.started?.(data); } catch { /* optional metadata */ } }
+          });
+          publish();
         }).catch(() => { /* Optional registration never replaces another owner. */ });
     }
   });
@@ -313,7 +318,12 @@ export function installActivityBridge(pi, options = {}) {
     }
     publish();
   });
+  on('tool_execution_update', event => {
+    try { tracking?.tool?.(event, true); } catch { /* optional metadata */ }
+    publish();
+  });
   on('tool_execution_end', (event) => {
+    try { tracking?.tool?.(event, false); } catch { /* optional metadata */ }
     if (key(event.toolCallId)) tools.delete(idFor('tool', event.toolCallId));
     const duration = Number.isSafeInteger(event.durationMs) && event.durationMs >= 0 ? ` · ${event.durationMs.toLocaleString('en-US')}ms` : '';
     toolEvent(event, event.isError ? 'failed' : 'finished', `${event.isError ? 'Failed' : 'Finished'} ${name(event.toolName) ?? 'tool'}${duration}`);

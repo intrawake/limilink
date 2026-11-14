@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
+from test.pi_output_fixture import pi_stdout
 from session_activity import MAX_BYTES, activity_snapshot
 from session_lease import session_lease
 
@@ -40,6 +41,47 @@ def recorded(test_sessions_dir):
     path = session / ".activity.json"
     path.write_text(json.dumps(snapshot))
     return path, snapshot
+
+
+def test_child_role_thinking_and_progress_are_whitelisted_and_revisioned(recorded):
+    path, snapshot = recorded
+    snapshot["nodes"][0].update(
+        agent="specialist",
+        thinking="max",
+        progress={"text": "Checked the parser", "at": 950, "args": "SECRET"},
+        sessionFile="/PRIVATE/child.jsonl",
+        bindings=[{"token": "SECRET"}],
+    )
+    path.write_text(json.dumps(snapshot))
+    result = activity_snapshot(path, True)
+    assert result["available"]
+    node = result["activity"]["nodes"][0]
+    assert node["agent"] == "specialist" and node["thinking"] == "max"
+    assert node["progress"] == {"text": "Checked the parser", "at": 950}
+    assert "SECRET" not in json.dumps(result) and "/PRIVATE" not in json.dumps(result)
+    snapshot["nodes"][0]["progress"]["text"] = "Checking browser behavior"
+    path.write_text(json.dumps(snapshot))
+    assert activity_snapshot(path, True)["revision"] != result["revision"]
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"agent": "../private"},
+        {"thinking": "invented"},
+        {"progress": {"text": "x" * 281, "at": 1}},
+        {"progress": {"text": "bad\nline", "at": 1}},
+        {"progress": {"text": "\u202ehidden", "at": 1}},
+        {"progress": {"text": "", "at": 1}},
+        {"progress": {"text": "valid", "at": -1}},
+        {"progress": {"text": "valid", "at": 1e300}},
+    ],
+)
+def test_malformed_child_display_metadata_fails_closed(recorded, fields):
+    path, snapshot = recorded
+    snapshot["nodes"][0].update(fields)
+    path.write_text(json.dumps(snapshot))
+    assert not activity_snapshot(path, True)["available"]
 
 
 def test_session_observation_whitelist_ancestry_and_revision(recorded):
@@ -350,7 +392,7 @@ def test_missing_symlink_fifo_and_read_failures_are_safe(recorded):
         assert not activity_snapshot(path, True)["available"]
 
 
-def test_agent_launch_preserves_print_mode_and_binds_observer_after_env_merges(
+def test_agent_launch_uses_one_shot_json_and_binds_observer_after_env_merges(
     recorded,
 ):
     path, _ = recorded
@@ -364,7 +406,7 @@ def test_agent_launch_preserves_print_mode_and_binds_observer_after_env_merges(
     }
     process = AsyncMock()
     process.returncode = 0
-    process.communicate.return_value = (b"Normal reply", b"")
+    process.communicate.return_value = (pi_stdout("Normal reply"), b"")
     with (
         patch("main.load_config", return_value=(config, str(owner.parent))),
         patch("main.asyncio.create_subprocess_exec", return_value=process) as spawn,
@@ -376,7 +418,7 @@ def test_agent_launch_preserves_print_mode_and_binds_observer_after_env_merges(
     assert response.json()["reply"] == "Normal reply"
     args = spawn.call_args.args
     assert args[-2:] == ("-p", "hello")
-    assert "--mode" not in args
+    assert args[args.index("--mode") + 1] == "json"
     extension = Path(args[args.index("--extension") + 1])
     assert extension.name == "activity-bridge.mjs" and extension.is_absolute()
     env = spawn.call_args.kwargs["env"]

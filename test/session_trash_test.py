@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
+from test.pi_output_fixture import pi_stdout
 import session_layout as layout
 from session_lease import session_lease
 
@@ -279,7 +280,7 @@ def test_agent_inherits_lease_independently_of_environment_overrides(root):
     }
     process = AsyncMock()
     process.returncode = 0
-    process.communicate.return_value = (b"reply", b"")
+    process.communicate.return_value = (pi_stdout("reply"), b"")
     with (
         patch("main.load_config", return_value=(config, str(root))),
         patch("main.asyncio.create_subprocess_exec", return_value=process) as launch,

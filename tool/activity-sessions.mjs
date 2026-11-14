@@ -7,7 +7,8 @@ import { createRequire } from 'node:module';
 import { dirname, join, isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { CHILD_LIMIT, instanceId, sessionKey, fileKey, slotName, privateDirectory } from './activity-child.mjs';
-import { contextUsage, idFor, keyedIdFor, modelName, name, safeCount, usageLabel } from './activity-metadata.mjs';
+import { contextUsage, idFor, keyedIdFor, modelName, name, safeCount, thinkingLevel, progressText, usageLabel, writeAtomicSnapshot } from './activity-metadata.mjs';
+import { createRoleBindings, createRoleLedger, roleFacts } from './activity-bindings.mjs';
 
 const RETAIN_MS = 5 * 60 * 1000;
 const eventKey = value => typeof value === 'string' && /^child-(event|tool):[0-9a-f]{32}$/.test(value);
@@ -37,6 +38,14 @@ function safeSource(raw, config, now) {
       || !Array.isArray(raw.records) || raw.records.length > CHILD_LIMIT.records) return null;
   const source = { instance: raw.instance, sessionKey: raw.sessionKey, fileKey: raw.fileKey, uuidKey: raw.uuidKey, parentKey: raw.parentKey,
     revision: raw.revision, updatedAt: raw.updatedAt, state: raw.state, omitted: raw.omitted, records: [] };
+  source.bindings = roleFacts(raw.bindings ?? [], 16) ?? [];
+  source.bindingsLimited = raw.bindingsLimited === true || roleFacts(raw.bindings ?? [], 16) === null;
+  const thinking = thinkingLevel(raw.thinking);
+  if (thinking) source.thinking = thinking;
+  if (typeof raw.progress?.text === 'string' && progressText(raw.progress.text) && safeCount(raw.progress.at)
+      && raw.progress.at <= raw.updatedAt && progressText(raw.progress.text) === raw.progress.text) {
+    source.progress = { text: raw.progress.text, at: raw.progress.at };
+  }
   const selected = modelName(raw.selectedModel);
   if (selected) source.selectedModel = selected;
   if (modelName(raw.responseModel?.id) && safeCount(raw.responseModel.at)) source.responseModel = { id: raw.responseModel.id, at: raw.responseModel.at };
@@ -68,7 +77,12 @@ function safeSource(raw, config, now) {
 
 export function createSessionStore(config, options = {}) {
   const now = options.now ?? Date.now;
-  const sources = new Map();
+  const sources = new Map(), roleHistory = createRoleLedger(), deferredReclaims = new Map();
+  const reclaim = (path, source) => {
+    if (source.bindings.length || source.bindingsLimited) {
+      deferredReclaims.set(path, {instance:source.instance,revision:source.revision});
+    } else { try { unlinkSync(path); } catch { /* own closed transport */ } }
+  };
   let lastRead = -Infinity, limited = false;
   const scan = () => {
     if (now() - lastRead >= 0 && now() - lastRead < 1000) return;
@@ -88,7 +102,7 @@ export function createSessionStore(config, options = {}) {
             || source.parentKey !== old.parentKey || source.revision < old.revision || (old.state === 'closed' && source.state !== 'closed'))) { limited = true; continue; }
         if (old && source.revision === old.revision) {
           if (JSON.stringify(source) !== JSON.stringify(old)) limited = true;
-          else if (source.state === 'closed' && now() - source.updatedAt > RETAIN_MS) { try { unlinkSync(path); } catch { /* own closed transport */ } }
+          else if (source.state === 'closed' && now() - source.updatedAt > RETAIN_MS) reclaim(path, source);
           continue;
         }
         if (sources.size >= CHILD_LIMIT.instances && !old) {
@@ -96,18 +110,30 @@ export function createSessionStore(config, options = {}) {
           if (!victim) { limited = true; continue; }
           sources.delete(victim.instance); limited = true;
         }
+        roleHistory.merge(source);
         sources.set(source.instance, source);
         // Only explicit owning shutdown permits transport reclamation. Retain a
         // bounded in-memory tail, never infer termination from TTL or omission.
         if (source.state === 'closed' && now() - source.updatedAt > RETAIN_MS) {
-          try { unlinkSync(path); } catch { /* own best-effort transport only */ }
+          reclaim(path, source);
         }
       }
     } catch { limited = true; }
   };
   return {
-    project(maxNodes = 63) {
-      scan();
+    bindingEvidence: roleHistory.snapshot,
+    reclaimPersistedEvidence() {
+      for (const [path, expected] of deferredReclaims) {
+        try {
+          const raw = readPrivateJSON(path, CHILD_LIMIT.bytes);
+          if (raw?.token === config.token && raw.rootKey === config.rootKey && raw.instance === expected.instance
+              && raw.revision === expected.revision && raw.state === 'closed') unlinkSync(path);
+          deferredReclaims.delete(path);
+        } catch (error) { if (error.code === 'ENOENT') deferredReclaims.delete(path); }
+      }
+    },
+    project(maxNodes = 63, rootBindings = {bindings:[]}) {
+      scan(); roleHistory.merge(rootBindings);
       const groups = new Map(), files = new Map([[config.rootFileKey, new Set([config.rootKey])]]);
       for (const source of sources.values()) {
         if (!groups.has(source.sessionKey)) groups.set(source.sessionKey, []);
@@ -115,6 +141,16 @@ export function createSessionStore(config, options = {}) {
         if (!files.has(source.fileKey)) files.set(source.fileKey, new Set());
         files.get(source.fileKey).add(source.sessionKey);
       }
+      const claims = new Map(), roleConflicts = new Set();
+      const evidence = roleHistory.snapshot(), bindingsLimited = evidence.bindingsLimited;
+      const collect = facts => {
+        for (const fact of facts) {
+          if (fact.agent === null) roleConflicts.add(fact.fileKey);
+          if (!claims.has(fact.fileKey)) claims.set(fact.fileKey, new Set());
+          claims.get(fact.fileKey).add(fact.agent);
+        }
+      };
+      collect(evidence.bindings);
       const nodes = [], events = [], edges = [];
       for (const [id, rows] of groups) {
         const open = rows.filter(row => row.state !== 'closed'), active = open.length === 1 ? open[0] : null;
@@ -138,6 +174,12 @@ export function createSessionStore(config, options = {}) {
             ...(!conflict && active?.selectedModel ? { selectedModel: active.selectedModel } : {}),
             ...(response ? { modelObservedAt: response.at } : {}), ...(input ? { lastInputObservedAt: input.at } : {}),
             ...(active?.invalidated ? { invalidated: active.invalidated } : {}) } };
+        const latest = active ?? (!open.length ? [...rows].sort((a, b) => b.updatedAt - a.updatedAt)[0] : null);
+        const roles = claims.get(latest?.fileKey);
+        if (!bindingsLimited && !conflict && files.get(latest?.fileKey)?.size === 1 && roles?.size === 1
+            && !roleConflicts.has(latest.fileKey)) node.agent = [...roles][0];
+        if (!conflict && latest?.thinking) node.thinking = latest.thinking;
+        if (!conflict && latest?.progress) node.progress = latest.progress;
         if (model) node.model = model;
         if (input) node.lastInputTokens = input.tokens;
         if (status === 'open' && active.context && !active.invalidated) node.context = active.context;
@@ -168,7 +210,7 @@ export function createSessionStore(config, options = {}) {
         if (node.parentId && !ids.has(node.parentId)) { node.parentId = null; node.observation.ancestry = 'unresolved'; }
         if (node.parentId) edges.push({ id: idFor('session-parent', node.parentId, node.id), source: node.parentId, target: node.id, kind: 'ancestry', label: 'Header parent file (historical)' });
       }
-      return { nodes: kept, edges, events: events.filter(row => ids.has(row.nodeId)), limited: limited || nodes.length > maxNodes };
+      return { nodes: kept, edges, events: events.filter(row => ids.has(row.nodeId)), limited: limited || bindingsLimited || nodes.length > maxNodes };
     },
   };
 }
@@ -208,8 +250,32 @@ export async function createSessionTracking(ctx, activityPath, options = {}) {
     if (readPrivateText(bootstrap, 4096) !== code) return null;
     const register = options.register ?? await resolveChildRegistration();
     registration = register({ sessionId: uuid, extensions: [{ id: 'limilink-session-observer', path: bootstrap }] });
-    const store = createSessionStore(config, options);
-    return { project: store.project, dispose() { registration?.dispose(); registration = null; } };
+    const store = createSessionStore(config, options), bindingsPath = join(directory, '.bindings.json');
+    let initial;
+    try {
+      const saved = readPrivateJSON(bindingsPath, 128 * 1024);
+      if (saved?.version === 1 && saved.token === config.token && saved.rootKey === config.rootKey
+          && roleFacts(saved.bindings, 256)) initial = saved;
+    } catch { /* No private role evidence to restore. */ }
+    const roles = createRoleBindings({token:config.token,file,uuid}, {...options,initial});
+    let previous = initial ? JSON.stringify({bindings:initial.bindings,bindingsLimited:initial.bindingsLimited === true}) : '';
+    return {
+      tool: (event, partial) => roles.tool(event, partial), started: data => roles.started(data),
+      project(max) {
+        const projected = store.project(max, roles.snapshot());
+        roles.merge(store.bindingEvidence());
+        const facts = roles.snapshot(), current = JSON.stringify(facts);
+        if (current !== previous) {
+          try { writeAtomicSnapshot(bindingsPath, {version:1,token:config.token,rootKey:config.rootKey,...facts}, `${bindingsPath}.tmp`); previous = current; }
+          catch { /* Display enrichment never blocks the observer. */ }
+        }
+        // Only a successful write (or an identical already-persisted ledger)
+        // permits deleting the source that supplied adverse role evidence.
+        if (previous === current) store.reclaimPersistedEvidence();
+        return projected;
+      },
+      dispose() { registration?.dispose(); registration = null; },
+    };
   } catch { registration?.dispose(); return null; }
 }
 

@@ -66,10 +66,10 @@ async page => {
     check(await page.locator('#activity-events').getByText('Model response · usage not reported', { exact: true }).isVisible(), 'Unknown usage was hidden or invented');
     check((await page.locator('#activity-events time').allTextContents()).join('|') === '2026-10-21 00:00:00 PDT|2026-01-21 11:00:00 PST|2026-10-21 11:00:00 PDT', 'Event timestamps mishandle date, midnight, timezone or daylight saving');
     await page.locator('.activity-node[data-id="child-1"]').click();
-    check((await page.locator('#activity-detail').innerText()).includes('not current occupancy'), 'Child measurement mislabeled');
+    check((await page.locator('#activity-detail').innerText()).includes('Last input at'), 'Historical input timestamp mislabeled');
     check((await page.locator('#activity-events summary').innerText()).includes('Review activity bridge'), 'History owner is unclear');
     check(await page.locator('#activity-events [data-event-id]').count() === 0, 'Main-agent events appeared as child history');
-    check((await page.locator('#activity-events').innerText()).includes('Per-tool history is not reported'), 'Missing child history was presented as reported work');
+    check((await page.locator('#activity-events').innerText()).includes('No tool history'), 'Missing child history was presented as reported work');
     check((await page.locator('#activity-detail').innerText()).includes('2026-10-21 11:00:00 PDT'), 'Context measurement timestamp has wrong format');
     const childUsage = 'Reported run total · cached 9k · in 1.2k · out 56';
     sample.nodes[1].model = 'provider/reported';
@@ -81,8 +81,8 @@ async page => {
     check((await page.locator('#activity-detail').innerText()).includes('Reported model'), 'Model provenance missing in details');
     check(await page.locator('#activity-events').getByText(childUsage, { exact: true }).isVisible(), 'Child-owned reported run usage missing');
     check(await page.locator('#activity-events [data-event-id]').count() === 1, 'Run totals borrowed main-agent history');
-    check((await page.locator('#activity-events').innerText()).includes('not context occupancy or usage attributed to one model'), 'Run totals overstated their basis');
-    check((await page.locator('#activity-events').innerText()).includes('Per-tool history is not reported'), 'Run totals implied per-tool history');
+    check((await page.locator('#activity-events').innerText()).includes('Cumulative usage.'), 'Run totals mislabeled as context occupancy');
+    check((await page.locator('#activity-events').innerText()).includes('No tool history'), 'Run totals implied per-tool history');
     await page.locator('#activity-detail button').first().click();
     check((await page.locator('.activity-edge-detail').innerText()).includes('delegation'), 'Edge details missing');
     await page.locator('.activity-node[data-id="child-2"]').click();

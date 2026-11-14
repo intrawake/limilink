@@ -41,7 +41,12 @@ s.sendto(json.dumps(event).encode(), "\\0" + os.environ["DELIVERY_EVENTS"])
 os.read(fd, 1)
 if message in ("fail", "empty"):
     sys.exit(1 if message == "fail" else 0)
-print(json.dumps(dict(type="response", command="compact", success=True, data=dict(summary="ok"))) if rpc else "reply: " + message, flush=True)
+if rpc:
+    print(json.dumps(dict(type="response", command="compact", success=True, data=dict(summary="ok"))), flush=True)
+else:
+    assert sys.argv[sys.argv.index('--mode')+1] == 'json'
+    print(json.dumps(dict(type='message_end',message=dict(role='assistant',stopReason='stop',content=[dict(type='text',text='reply: '+message)]))),flush=True)
+    print(json.dumps(dict(type='agent_settled',aborted=False)),flush=True)
 """)
     agent.chmod(0o700)
     cfg = {

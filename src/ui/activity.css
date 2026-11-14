@@ -3,7 +3,6 @@
 #activity-panel { width: 380px; flex: 0 0 380px; min-height: 0; display: flex; flex-direction: column; background: var(--panel); border-left: 1px solid var(--line); }
 .activity-heading { display: flex; align-items: center; justify-content: space-between; padding: 17px 16px; min-height: 78px; border-bottom: 1px solid var(--line); }
 .activity-heading h2 { font-size: 15px; font-weight: 600; }
-.activity-heading p { color: var(--muted); font-size: 11px; }
 #activity-body { overflow: auto; min-height: 0; padding: 14px 12px 24px; scrollbar-gutter: stable; }
 #activity-status { color: var(--muted); font-size: 12px; margin: 0 2px 14px; }
 #activity-status.activity-stale { color: #d9ba86; }
@@ -16,6 +15,10 @@
 .activity-edge.communication { stroke: #d9a28f; stroke-dasharray: 4 3; }
 .activity-edge-label { fill: var(--muted); font: 10px system-ui, sans-serif; }
 .activity-node { position: absolute; text-align: left; background: #242831; border: 1px solid #424551; border-radius: 10px; padding: 10px 12px; height: 108px; display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
+.activity-node.has-progress { height: 152px; }
+.activity-progress { margin-top: 3px; min-height: 0; text-align: left; }
+.activity-progress-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; font-size: 11px; line-height: 14px; }
+.activity-progress time { display: block; color: var(--muted); font-size: 10px; }
 .activity-node:hover { background: #2c2f3a; border-color: #777385; }
 .activity-node.selected { border-color: var(--accent); background: #302a32; }
 .activity-node strong { font-size: 13px; font-weight: 600; display: flex; justify-content: space-between; gap: 6px; }

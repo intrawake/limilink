@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from main import app, ensure_session_initialized, reconcile_session_symlinks
+from test.pi_output_fixture import pi_stdout
 
 client = TestClient(app)
 
@@ -73,7 +74,7 @@ async def test_chat_endpoint_invokes_pi(mock_exec, test_sessions_dir):
     # Setup mock subprocess
     mock_process = AsyncMock()
     mock_process.returncode = 0
-    mock_process.communicate.return_value = (b"mocked response from pi", b"")
+    mock_process.communicate.return_value = (pi_stdout("mocked response from pi"), b"")
     mock_exec.return_value = mock_process
 
     preset_config_path = os.path.abspath(
@@ -262,7 +263,7 @@ def test_create_session_with_agent_symlinks(test_sessions_dir):
 async def test_model_switching(mock_exec):
     mock_process = AsyncMock()
     mock_process.returncode = 0
-    mock_process.communicate.return_value = (b"mocked response", b"")
+    mock_process.communicate.return_value = (pi_stdout("mocked response"), b"")
     mock_exec.return_value = mock_process
 
     session_id = "test_model_session"
@@ -312,7 +313,7 @@ async def test_continue_flag_injection(mock_exec, mock_load_config):
     # Setup mock subprocess
     mock_process = AsyncMock()
     mock_process.returncode = 0
-    mock_process.communicate.return_value = (b"mocked response", b"")
+    mock_process.communicate.return_value = (pi_stdout("mocked response"), b"")
     mock_exec.return_value = mock_process
 
     session_id = "test_resume_session"
@@ -351,7 +352,7 @@ async def test_pi_harness_passes_approve(mock_exec, mock_load_config):
 
     mock_process = AsyncMock()
     mock_process.returncode = 0
-    mock_process.communicate.return_value = (b"mocked response", b"")
+    mock_process.communicate.return_value = (pi_stdout("mocked response"), b"")
     mock_exec.return_value = mock_process
 
     with TestClient(app) as c:
@@ -390,7 +391,7 @@ async def test_pi_readonly_restricts_tools(mock_exec, mock_load_config):
 
     mock_process = AsyncMock()
     mock_process.returncode = 0
-    mock_process.communicate.return_value = (b"mocked response", b"")
+    mock_process.communicate.return_value = (pi_stdout("mocked response"), b"")
     mock_exec.return_value = mock_process
 
     with TestClient(app) as c:
@@ -421,7 +422,7 @@ async def test_pi_directory_creation_on_chat(test_sessions_dir):
     with patch("main.asyncio.create_subprocess_exec") as mock_exec:
         mock_process = AsyncMock()
         mock_process.returncode = 0
-        mock_process.communicate.return_value = (b"ok", b"")
+        mock_process.communicate.return_value = (pi_stdout("ok"), b"")
         mock_exec.return_value = mock_process
 
         with TestClient(app) as c:
@@ -446,7 +447,7 @@ async def test_tmpdir_isolation_and_cleanup(mock_exec, test_sessions_dir):
     """
     mock_process = AsyncMock()
     mock_process.returncode = 0
-    mock_process.communicate.return_value = (b"ok", b"")
+    mock_process.communicate.return_value = (pi_stdout("ok"), b"")
     mock_exec.return_value = mock_process
 
     session_id = "test_tmpdir_session"
@@ -476,7 +477,7 @@ async def test_session_delete_cleans_tmpdir(mock_exec, test_sessions_dir):
     """Deleting a session removes its tmp/ directory."""
     mock_process = AsyncMock()
     mock_process.returncode = 0
-    mock_process.communicate.return_value = (b"ok", b"")
+    mock_process.communicate.return_value = (pi_stdout("ok"), b"")
     mock_exec.return_value = mock_process
 
     session_id = "test_delete_tmpdir_session"
@@ -510,7 +511,7 @@ async def test_env_vars_canonical_env_dict(mock_exec, mock_load_config):
     """The top-level ``env_dict`` is injected."""
     mock_process = AsyncMock()
     mock_process.returncode = 0
-    mock_process.communicate.return_value = (b"mocked response", b"")
+    mock_process.communicate.return_value = (pi_stdout("mocked response"), b"")
     mock_exec.return_value = mock_process
 
     mock_load_config.return_value = (
@@ -536,7 +537,7 @@ async def test_env_vars_canonical_env_dict(mock_exec, mock_load_config):
 async def test_env_command(mock_exec):
     mock_process = AsyncMock()
     mock_process.returncode = 0
-    mock_process.communicate.return_value = (b"mocked response", b"")
+    mock_process.communicate.return_value = (pi_stdout("mocked response"), b"")
     mock_exec.return_value = mock_process
 
     session_id = "test_env_command_session"

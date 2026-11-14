@@ -35,7 +35,7 @@ if (!process.argv.includes('--isolated')) {
   writeFileSync(bootstrap, "export * as sdk from '@earendil-works/pi-coding-agent';export {registerRequiredChildExtensions} from 'pi-subagents/required-child-extensions';");
   const { sdk, registerRequiredChildExtensions } = await import(pathToFileURL(bootstrap).href);
   const require = createRequire(join(npmRoot, 'package.json'));
-  assert.equal(JSON.parse(readFileSync(join(npmRoot, 'pi-subagents', 'package.json'))).version, '0.78.0');
+  assert.equal(JSON.parse(readFileSync(join(npmRoot, 'pi-subagents', 'package.json'))).version, '0.88.0');
   writeFileSync(join(agentDir, 'settings.json'), JSON.stringify({ compaction: { enabled: false }, retry: { enabled: false } }));
   writeFileSync(join(agentDir, 'extensions', 'subagent', 'config.json'), JSON.stringify({ defaultSubagentContext: 'fresh', maxSubagentDepth: 2, completionBatch: { enabled: false } }));
   writeFileSync(join(root, 'private-read-fixture.txt'), 'PRIVATE_BODY_NEVER_IN_ACTIVITY');
@@ -44,7 +44,8 @@ if (!process.argv.includes('--isolated')) {
 export default function(pi){
  let child=false;
  pi.on('session_start',(_event,ctx)=>{child=typeof ctx.sessionManager.getHeader()?.parentSession==='string';});
- // Parent completion wakes are consumed. Child prompts use only the local script.
+ // User prompts are consumed. Stock custom completion wakes and child prompts
+ // use only this local adapter; custom wakes no longer pass through input.
  pi.on('input',()=>child?undefined:{action:'handled'});
  pi.registerProvider('observer-proof',{api:'observer-scripted',apiKey:'fixture-only',baseUrl:'http://127.0.0.1:1',
   models:['worker','parent'].map(id=>({id,name:id,reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:8192,maxTokens:1024})),
@@ -84,10 +85,14 @@ export default function(pi){
           const nodes = snapshot.nodes.filter(node => node.observation), tools = snapshot.events.filter(row => row.kind === 'tool' && nodes.some(node => node.id === row.nodeId));
           if (nodes.length === 5 && tools.length >= 10 && nodes.every(node => node.state === 'closed')) observedResolve();
         } });
+      pi.on('before_agent_start', event => {
+        assert.equal(event.messageType, 'custom');
+        assert.equal(event.message.customType, 'subagent-notify');
+      });
       pi.on('agent_start', () => { parentModelRuns++; });
       pi.events.on('subagent:async-complete', event => { const id = event.runId ?? event.id; completions.set(id, event); waiting.get(id)?.(); });
     }] });
-  await loader.reload(); assert.equal(loader.getExtensions().errors.length, 0);
+  await loader.reload(); assert.deepEqual(loader.getExtensions().errors, []);
   const { session } = await sdk.createAgentSession({ cwd: root, agentDir, sessionManager: manager, resourceLoader: loader, tools: [], settingsManager: sdk.SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }) });
   const deadline = setTimeout(() => { console.error('Smoke observation deadline; fixture:', root); process.exitCode = 1; session.dispose(); observedResolve(); }, 30000);
   try {
@@ -96,8 +101,15 @@ export default function(pi){
     await launch('observer-fixture');
     const step = key => ({ key, label: `Observe ${key} session`, agent: 'observer-fixture', task: 'Synthetic local SDK fixture', context: 'fresh', acceptance: { level: 'none', reason: 'Scripted SDK fixture' } });
     const parallel = await rpc('spawn', { script: `await runs.all(${JSON.stringify([step('left'), step('right')])});`, async: true }); await complete(parallel.details.runId);
-    await launch('observer-parent'); await allObserved;
-    assert.equal(parentModelRuns, 0); assert.equal(existsSync(join(root, 'network-attempts')), false);
+    await launch('observer-parent'); await allObserved; await session.waitForIdle();
+    assert.equal(parentModelRuns, 3, 'Exactly one stock custom wake per top-level completion');
+    const notices = manager.getBranch().filter(entry=>entry.type==='custom_message'&&entry.customType==='subagent-notify');
+    assert.equal(notices.length,3,'All native completion notices were persisted');
+    const awaitedChildren=[...completions.values()].filter(event=>event.awaitedByWorkflow===true);
+    assert.equal(awaitedChildren.length,2,'Workflow leaves settle without independent parent turns');
+    const notifyingRuns=[...completions].filter(([,event])=>event.awaitedByWorkflow!==true).map(([id])=>id);
+    assert.deepEqual(notices.flatMap(entry=>entry.details.runs.map(run=>run.runId)).sort(),notifyingRuns.sort(),'Every wake belongs to exactly one notifying run');
+    assert.equal(existsSync(join(root, 'network-attempts')), false);
     const children = latest.nodes.filter(node => node.observation);
     assert.equal(children.length, 5); assert.equal(new Set(children.map(node => node.id)).size, 5);
     assert.equal(children.filter(node => node.parentId === 'parent').length, 4);
@@ -107,6 +119,8 @@ export default function(pi){
     assert.equal(tools.filter(row => row.parentEventId).length, 5);
     for (const row of tools.filter(row => row.parentEventId)) assert.equal(tools.find(parent => parent.id === row.parentEventId)?.nodeId, row.nodeId);
     assert.ok(children.every(node => node.observation.modelBasis === 'response' && node.lastInputTokens === 30));
+    assert.deepEqual(children.map(node=>node.agent).sort(), ['observer-fixture','observer-fixture','observer-fixture','observer-leaf','observer-parent']);
+    assert.ok(children.every(node=>node.thinking==='off'), 'Own runtime thinking was not captured');
     assert.ok(latest.events.some(row => row.kind === 'model' && row.nodeId.startsWith('session:') && row.label.includes('cached 18')));
     const publicJSON = JSON.stringify(latest);
     assert.ok(!publicJSON.includes(root)); assert.ok(!publicJSON.includes('PRIVATE_BODY_NEVER_IN_ACTIVITY'));
@@ -135,7 +149,7 @@ export default function(pi){
       assert.equal(existsSync(join(root, 'network-attempts')), false);
     } finally { clearTimeout(cliTimeout); cli.kill('SIGTERM'); await exited; }
     const scriptedStreams = readFileSync(join(root, 'scripted-streams'), 'utf8').trim().split('\n').length;
-    console.log(JSON.stringify({ passed: true, stockVersion: '0.78.0', observerSessions: 5, realSDKToolRows: tools.length, nestedSession: true, actualCLIResolution: true, scriptedStreams, realModelProviderCalls: 0, networkAttempts: 0, scope: 'stock-SDK-with-local-scripted-responses', fixture: root }));
+    console.log(JSON.stringify({ passed: true, stockVersion: '0.88.0', observerSessions: 5, realSDKToolRows: tools.length, nestedSession: true, actualCLIResolution: true, scriptedStreams, scriptedParentCompletionWakes: parentModelRuns, realModelProviderCalls: 0, networkAttempts: 0, scope: 'stock-SDK-with-local-scripted-responses', fixture: root }));
   } finally {
     clearTimeout(deadline); await session.extensionRunner?.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose();
   }

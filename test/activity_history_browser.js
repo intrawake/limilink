@@ -42,7 +42,7 @@ async page => {
     const chat = await page.locator('.message').first().elementHandle();
     await page.locator('#activity-toggle').click();
     await card('closed-child').waitFor();
-    check(await page.locator('#activity-current-heading').innerText() === 'Current observations', 'Current heading missing');
+    check(await page.locator('#activity-current-heading').innerText() === 'Current', 'Current heading missing');
     check(await page.locator('#activity-history-heading').innerText() === 'Recent history', 'History heading missing');
     for (const id of ['closed-child', 'closed-nested']) await group(id, 'history');
     for (const id of ['parent', 'idle-child', 'stale-child', 'conflict-child']) await group(id, 'current');
@@ -64,8 +64,8 @@ async page => {
     check(geometry.groups.join(',').indexOf('history,current') === -1, 'History heading precedes current cards in DOM');
     await page.locator('#activity-events summary').click();
     await card('closed-child').click();
-    check((await page.locator('#activity-detail').innerText()).includes('Recent history · observer closed; not current activity'), 'Closed observation looks current');
-    check((await page.locator('#activity-detail').innerText()).includes('does not establish native task success'), 'Closure overclaims success');
+    check((await page.locator('#activity-detail').innerText()).includes('View Recent history'), 'Closed observation looks current');
+    check((await page.locator('#activity-detail').innerText()).includes('Status closed'), 'Closure mislabeled as task success');
     check(await page.locator('[data-event-id="closed-read"]').count() === 1, 'History tool inspection lost');
     const cross = page.locator('#activity-detail button[data-edge="cross"]');
     check(await cross.count() === 1, 'Cross-section relationship lost from Connections');

@@ -1,4 +1,4 @@
-/** Small, shared metadata-only validators/formatters. Never inspect content. */
+/** Bounded display metadata. Progress is an explicit supervisor update, never general content. */
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { writeFileSync, renameSync, unlinkSync } from 'node:fs';
 
@@ -14,6 +14,13 @@ export const key = s => typeof s === 'string' && s.length > 0 && s.length <= 102
 export const idFor = (namespace, ...parts) => `${namespace}:${createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 32)}`;
 export const keyedIdFor = (token, namespace, ...parts) => `${namespace}:${createHmac('sha256', token).update(JSON.stringify(parts)).digest('hex').slice(0, 32)}`;
 export const safeCount = n => Number.isSafeInteger(n) && n >= 0;
+export const thinkingLevel = value => ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(value) ? value : null;
+export function progressText(value) {
+  if (typeof value !== 'string' || value.length > 65536) return null;
+  const line = value.split(/[\r\n]/, 1)[0].replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim();
+  return line ? [...line].slice(0, 280).join('') : null;
+}
 const tokenCount = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
 
 export function contextUsage(usage, at) {

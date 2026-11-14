@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from main import app
+from test.pi_output_fixture import pi_stdout
 
 
 @pytest.fixture
@@ -29,7 +30,7 @@ def mock_config():
 async def test_agent_switching(mock_exec, mock_config):
     mock_process = AsyncMock()
     mock_process.returncode = 0
-    mock_process.communicate.return_value = (b"mocked response", b"")
+    mock_process.communicate.return_value = (pi_stdout("mocked response"), b"")
     mock_exec.return_value = mock_process
 
     session_id = "test_agent_switch_session"
@@ -148,7 +149,7 @@ async def test_agent_switch_reconciles_pi_resources(tmp_path, test_sessions_dir)
 async def test_pi_agent_env_vars(mock_exec, mock_config):
     mock_process = AsyncMock()
     mock_process.returncode = 0
-    mock_process.communicate.return_value = (b"mocked response", b"")
+    mock_process.communicate.return_value = (pi_stdout("mocked response"), b"")
     mock_exec.return_value = mock_process
 
     session_id = "test_pi_agent_env_session"
@@ -252,7 +253,7 @@ async def test_reasoning_effort_set_and_query(
 
     mock_process = AsyncMock()
     mock_process.returncode = 0
-    mock_process.communicate.return_value = (b"ok", b"")
+    mock_process.communicate.return_value = (pi_stdout("ok"), b"")
     mock_exec.return_value = mock_process
 
     session_id = "test_reasoning_effort_set"
@@ -351,7 +352,7 @@ async def test_reasoning_effort_in_preset_writes_settings(
 
     mock_process = AsyncMock()
     mock_process.returncode = 0
-    mock_process.communicate.return_value = (b"ok", b"")
+    mock_process.communicate.return_value = (pi_stdout("ok"), b"")
     mock_exec.return_value = mock_process
 
     # Override the mock_config to include a preset with reasoning_effort

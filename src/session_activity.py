@@ -49,6 +49,15 @@ class SessionTracking(Record):
     limited: bool
 
 
+class Progress(Record):
+    text: str = Field(
+        min_length=1,
+        max_length=280,
+        pattern=r"^[^\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]+$",
+    )
+    at: float = Field(ge=0, le=8.64e15)
+
+
 class Node(Record):
     id: str = Field(max_length=240)
     parentId: str | None = Field(default=None, max_length=240)
@@ -61,6 +70,13 @@ class Node(Record):
     updatedAt: float | None = Field(default=None, ge=0)
     currentTool: str | None = Field(default=None, max_length=120)
     observation: SessionObservation | None = None
+    agent: str | None = Field(
+        default=None, max_length=96, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,95}$"
+    )
+    thinking: (
+        Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"] | None
+    ) = None
+    progress: Progress | None = None
 
 
 class Edge(Record):

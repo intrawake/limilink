@@ -2,6 +2,7 @@ import asyncio
 import multiprocessing
 import os
 import socket
+import shlex
 import stat
 import time
 
@@ -10,6 +11,7 @@ import pytest
 import uvicorn
 
 from main import app
+from test.pi_output_fixture import pi_stdout
 
 
 def get_free_port():
@@ -28,7 +30,10 @@ def run_server(port, test_sessions_dir, config_path):
 @pytest.fixture
 def slow_pi_config(tmp_path):
     mock_pi = tmp_path / "mock_pi.sh"
-    mock_pi.write_text("#!/bin/bash\nsleep 1\necho 'mocked response'")
+    mock_pi.write_text(
+        "#!/bin/bash\nsleep 1\nprintf %s "
+        + shlex.quote(pi_stdout("mocked response").decode())
+    )
     mock_pi.chmod(mock_pi.stat().st_mode | stat.S_IEXEC)
 
     config_path = tmp_path / "config.sxpb"

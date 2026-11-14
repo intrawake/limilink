@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from main import app
+from test.pi_output_fixture import pi_stdout
 
 
 @pytest.fixture
@@ -67,7 +68,7 @@ async def test_default_agent_is_first_in_agent_by_alias(
     the *first* agent listed in agent_by_alias, not a hardcoded default."""
     mock_process = AsyncMock()
     mock_process.returncode = 0
-    mock_process.communicate.return_value = (b"mocked response", b"")
+    mock_process.communicate.return_value = (pi_stdout("mocked response"), b"")
     mock_exec.return_value = mock_process
 
     with TestClient(app) as c:

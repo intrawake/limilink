@@ -39,7 +39,9 @@ if rpc:
     print(json.dumps({'type':'response','command':'compact','success':True,'data':{'tokensBefore':1000,'estimatedTokensAfter':100,'summary':'Fixture compaction'}}),flush=True)
     for line in sys.stdin: pass
 else:
-    print('Fixture '+message,flush=True)
+    assert sys.argv[sys.argv.index('--mode')+1] == 'json'
+    print(json.dumps({'type':'message_end','message':{'role':'assistant','stopReason':'stop','content':[{'type':'text','text':'Fixture '+message}]}}),flush=True)
+    print(json.dumps({'type':'agent_settled','aborted':False}),flush=True)
 """
 
 

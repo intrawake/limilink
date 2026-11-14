@@ -1,13 +1,14 @@
 /** Child-only Pi extension implementation. Native events -> bounded metadata.
- * No prompts, journals, tool arguments/results, process-global session state,
- * provider calls, registration of tools, or writes to the parent snapshot.
+ * Only explicit supervisor progress and child file/role metadata are read from
+ * tool events. No prompts, journals, general tool bodies or parent snapshot writes.
  */
 import { randomUUID } from 'node:crypto';
 import { lstatSync, openSync, closeSync, unlinkSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
-import { contextUsage, idFor, keyedIdFor, key, observedModel, name, safeCount, usageLabel, writeAtomicSnapshot } from './activity-metadata.mjs';
+import { contextUsage, idFor, keyedIdFor, key, observedModel, name, safeCount, thinkingLevel, progressText, usageLabel, writeAtomicSnapshot } from './activity-metadata.mjs';
+import { createRoleBindings } from './activity-bindings.mjs';
 
-export const CHILD_LIMIT = Object.freeze({ records: 12, bytes: 4096, tools: 64, instances: 128, heartbeatMs: 2000, staleMs: 10000 });
+export const CHILD_LIMIT = Object.freeze({ records: 12, bytes: 8192, tools: 64, instances: 128, heartbeatMs: 2000, staleMs: 10000 });
 export const slotName = slot => `slot-${String(slot).padStart(3, '0')}.json`;
 export const fileKey = value => typeof value === 'string' && /^file:[0-9a-f]{32}$/.test(value);
 export const instanceId = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
@@ -26,7 +27,7 @@ export function installChildObserver(pi, config, options = {}) {
   const subscriptions = [];
   const listen = (event, handler) => { const off = pi.on(event, handler); if (typeof off === 'function') subscriptions.push(off); };
   let state = 'idle', selectedModel = null, responseModel = null, lastInput = null, context = null, invalidated = null, fresh = false;
-  let records = [], tools = new Map(), seenTools = new Set();
+  let records = [], tools = new Map(), seenTools = new Set(), seenProgress = new Set(), thinking = null, progress = null, bindings, startedOff;
   const identify = candidate => {
     const file = candidate?.sessionManager.getSessionFile(), parent = candidate?.sessionManager.getHeader()?.parentSession;
     const uuid = candidate?.sessionManager.getSessionId();
@@ -43,9 +44,13 @@ export function installChildObserver(pi, config, options = {}) {
         revision, updatedAt: now(), state, omitted, records,
         ...(selectedModel ? { selectedModel } : {}), ...(responseModel ? { responseModel } : {}),
         ...(lastInput ? { lastInput } : {}), ...(context ? { context } : {}), ...(invalidated ? { invalidated } : {}),
+        ...(thinking ? { thinking } : {}), ...(progress ? { progress } : {}), ...bindings?.snapshot(),
         ...(tools.size ? { currentTool: [...tools.values()].at(-1).name } : {}) };
       while (records.length && (records.length > CHILD_LIMIT.records || Buffer.byteLength(JSON.stringify(snapshot)) > CHILD_LIMIT.bytes)) {
         records.shift(); omitted = increment(omitted); snapshot.omitted = omitted;
+      }
+      if (Buffer.byteLength(JSON.stringify(snapshot)) > CHILD_LIMIT.bytes) {
+        snapshot.bindings = []; snapshot.bindingsLimited = true;
       }
       write(join(config.directory, slotName(slot)), snapshot);
     } catch { /* Optional telemetry must not throw through Pi's handlers. */ }
@@ -66,6 +71,7 @@ export function installChildObserver(pi, config, options = {}) {
   const close = () => {
     if (timer !== undefined) unschedule(timer);
     timer = undefined;
+    startedOff?.(); startedOff = undefined;
     if (!identity || state === 'closed') return;
     settle(); state = 'closed'; context = null; record('session', 'Session observer closed'); publish();
   };
@@ -97,11 +103,15 @@ export function installChildObserver(pi, config, options = {}) {
     sequence = 0; revision = 0; omitted = 0; pendingResponse = false;
     records = []; tools = new Map(); seenTools = new Set(); state = 'idle'; fresh = false; invalidated = null; lastInput = null; context = null;
     selectedModel = observedModel(ctx.model); responseModel = null;
+    thinking = thinkingLevel(ctx.thinkingLevel); progress = null; seenProgress = new Set();
+    bindings = createRoleBindings({token:config.token,file:ctx.sessionManager.getSessionFile(),uuid:ctx.sessionManager.getSessionId()}, {now,limit:16});
+    startedOff = pi.events?.on('subagent:async-started', data => { try { bindings.started(data); } catch { /* optional metadata */ } });
     record('session', 'Session observer started'); publish();
     timer = schedule(() => {
       try {
         const current = identify(ctx);
         if (!current || current.sessionKey !== identity?.sessionKey || current.parentKey !== identity?.parentKey) { close(); identity = null; return; }
+        thinking = thinkingLevel(ctx.thinkingLevel);
         publish();
       } catch { close(); identity = null; }
     }, CHILD_LIMIT.heartbeatMs); timer?.unref?.();
@@ -188,6 +198,19 @@ export function installChildObserver(pi, config, options = {}) {
       publish();
     });
     const invalidate = reason => { context = null; fresh = false; invalidated = reason; record('context', reason === 'compaction' ? 'Context compacted' : 'Selected model changed'); publish(); };
+    on('tool_execution_update', event => { bindings.tool(event, true); publish(); });
+    on('tool_result', event => {
+      if (event.toolName === 'subagent') { bindings.tool({toolName:event.toolName,result:{details:event.details}}); publish(); }
+      if (event.toolName !== 'contact_supervisor' || event.isError || !key(event.toolCallId)
+          || seenProgress.has(event.toolCallId) || event.input?.reason !== 'progress_update') return;
+      const text = progressText(event.input.message);
+      if (text) {
+        // Recent callback deduplication, not a lifetime cap on progress reports.
+        if (seenProgress.size >= 256) seenProgress.delete(seenProgress.values().next().value);
+        seenProgress.add(event.toolCallId); progress = { text, at: now() }; publish();
+      }
+    });
+    on('thinking_level_select', event => { thinking = thinkingLevel(event.level); publish(); });
     on('session_compact', () => invalidate('compaction'));
     on('model_select', event => { selectedModel = observedModel(event.model); invalidate('model-change'); });
     on('session_shutdown', close);

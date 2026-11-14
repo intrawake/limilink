@@ -5,6 +5,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from main import app
+from test.pi_output_fixture import pi_stdout
 
 
 @pytest.mark.asyncio
@@ -18,7 +19,7 @@ async def test_concurrency_lock():
             mock_process = AsyncMock()
             mock_process.returncode = 0
             mock_process.communicate.return_value = (
-                b"mocked response from pi",
+                pi_stdout("mocked response from pi"),
                 b"",
             )
             return mock_process

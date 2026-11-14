@@ -53,7 +53,11 @@
         : node.id === 'parent' ? 'Model' : 'Reported model';
     const modelText = node => node.model ? `${node.id === 'parent' ? '' : `${modelLabel(node)}: `}${node.model}`
         : node.kind === 'workflow' ? 'Workflow' : node.kind === 'step' ? 'Execution step' : 'Model not reported';
-    const nodeLabel = node => node.kind === 'step' ? `Execution step: ${node.label}` : node.label;
+    const nodeLabel = node => node.kind === 'step' ? `Execution step: ${node.label}` : node.agent || node.label;
+    const progressFor = node => typeof node.progress?.text === 'string' && node.progress.text.length > 0
+        && [...node.progress.text].length <= 280 && Number.isFinite(new Date(node.progress.at).getTime())
+        && Number.isFinite(node.progress.at) && node.progress.at >= 0 ? node.progress : null;
+    const modelWithThinking = node => (node.thinking ? `${node.thinking} · ` : '') + modelText(node);
     // Legacy snapshots call all hierarchy edges delegation, including steps.
     const executionEdge = edge => edge.kind === 'delegation' && snapshot?.nodes.some(node => node.id === edge.target && node.kind === 'step');
     const edgeLabel = edge => executionEdge(edge) ? 'Execution step' : edge.label;
@@ -235,7 +239,7 @@
             const delegation = edge.kind === 'delegation' || edge.kind === 'ancestry';
             // Solid ancestry on the left, observed communication on the right.
             const d = delegation
-                ? `M ${from.x + 8} ${from.y + 108} V ${to.y + 54} H ${to.x - 3}`
+                ? `M ${from.x + 8} ${from.y + (from.height ?? 108)} V ${to.y + (to.height ?? 108) / 2} H ${to.x - 3}`
                 : `M ${width - 17} ${from.y + 70} H ${width - 3} V ${to.y + 70} H ${width - 17}`;
             path.setAttribute('d', d);
             path.setAttribute('class', `activity-edge${delegation ? '' : ' communication'}`);
@@ -292,18 +296,17 @@
         eventList.replaceChildren();
         if (owner?.observation) {
             const observed = owner.observation, sourceState = observationStatus(owner);
-            const notes = ['Bounded Pi-session observations, not native run/step/retry history.'];
-            if (observed.omitted) notes.push(`${number(observed.omitted)} observations outside the retained history.`);
-            if (sourceState === 'conflict') notes.push('Conflicting unclosed observers: current state and context are unavailable.');
-            if (sourceState === 'stale') notes.push('Observer stale: rows are last observations, not proof of current execution.');
-            if (sourceState === 'closed') notes.push('Observer shutdown was seen; this does not establish native task success.');
-            eventList.append(el('li', notes.join(' '), 'activity-event-note'));
+            const notes = [];
+            if (observed.omitted) notes.push(`${number(observed.omitted)} older events omitted.`);
+            if (sourceState === 'conflict') notes.push('Conflicting sources; state unavailable.');
+            if (sourceState === 'stale') notes.push('Stale; showing last activity.');
+            if (notes.length) eventList.append(el('li', notes.join(' '), 'activity-event-note'));
+            if (!rows.length && !notes.length) eventList.append(el('li', 'No recent activity.', 'activity-event-note'));
         } else if (selected !== 'parent' && rows.some(row => row.kind === 'usage')) {
             const missingTools = !rows.some(row => row.kind === 'tool');
-            eventList.append(el('li', 'Package-reported run totals are cumulative, not context occupancy or usage attributed to one model.'
-                + (missingTools ? ' Per-tool history is not reported.' : ''), 'activity-event-note'));
-        } else if (!rows.length) eventList.append(el('li', selected === 'parent' ? 'No recent activity reported.'
-            : 'Per-tool history is not reported for this selection. Select the main agent to view its activity.', 'activity-event-note'));
+            eventList.append(el('li', 'Cumulative usage.' + (missingTools ? ' No tool history.' : ''), 'activity-event-note'));
+        } else if (!rows.length) eventList.append(el('li', selected === 'parent' ? 'No recent activity.'
+            : 'No tool history.', 'activity-event-note'));
         for (const row of [...rows].reverse()) if (!parents.has(row.id)) append(row, eventList, 0);
         // Defensive fallback: malformed relationships must never hide a row.
         for (const row of [...rows].reverse()) append(row, eventList, 0);
@@ -313,7 +316,7 @@
         status.classList.toggle('activity-stale', live && stale);
         const tracking = snapshot.sessionTracking;
         status.textContent = `${live ? stale ? 'Last observation' : 'Live' : 'Last run'} · ${time(snapshot.updatedAt)}${live && stale ? ` · ${age(snapshot.updatedAt)}s ago` : ''}`
-            + (tracking ? tracking.available ? ' · Observed Pi sessions' : ' · Session observer unavailable' : '')
+            + (tracking && !tracking.available ? ' · Session observer unavailable' : '')
             + (tracking?.limited ? ' · Observation limit reached' : '');
         const nodes = visibleNodes().sort((a, b) => (b.id === 'parent') - (a.id === 'parent'));
         const root = nodes.find(node => node.id === 'parent');
@@ -340,15 +343,16 @@
         const width = Math.max(graph.clientWidth, 270);
         let height = 0;
         const ordered = [], headings = new Map();
-        for (const [group, title] of [['current', 'Current observations'], ['history', 'Recent history']]) {
+        for (const [group, title] of [['current', 'Current'], ['history', 'Recent history']]) {
             const members = nodes.filter(node => historyNode(node) === (group === 'history'));
             if (!members.length) continue;
             const heading = el('h3', title, 'activity-section-heading');
             heading.id = `activity-${group}-heading`; heading.dataset.group = group;
             heading.style.top = `${height}px`; headings.set(group, heading); height += 32;
             for (const node of members) {
-                positions.set(node.id, { x: 12 + depth(node) * 18, y: height, group });
-                ordered.push(node); height += 138;
+                const cardHeight = progressFor(node) ? 152 : 108;
+                positions.set(node.id, { x: 12 + depth(node) * 18, y: height, group, height: cardHeight });
+                ordered.push(node); height += cardHeight + 30;
             }
         }
         graph.style.height = `${height}px`;
@@ -367,18 +371,30 @@
             graph.append(card);
             existing.delete(node.id);
             card.dataset.group = position.group;
+            card.classList.toggle('has-progress', !!progressFor(node));
             card.setAttribute('aria-describedby', `activity-${position.group}-heading`);
             const sourceState = observationStatus(node);
             const stateText = sourceState === 'closed' ? 'closed' : sourceState === 'stale' ? `last observed ${node.state}` : node.state;
             card.dataset.state = sourceState === 'closed' ? 'closed' : sourceState === 'stale' ? 'unknown' : node.state;
             card.style.left = `${position.x}px`; card.style.right = '18px'; card.style.top = `${position.y}px`;
-            card.setAttribute('aria-label', `${nodeLabel(node)}: ${stateText}. ${nodeContextText(node)}`);
+            card.setAttribute('aria-label', `${nodeLabel(node)}: ${stateText}. ${nodeContextText(node)}${node.thinking ? `. Selected thinking ${node.thinking}` : ''}`);
             const title = el('strong'); title.append(el('span', nodeLabel(node)), el('span', stateText, 'activity-state'));
             const meter = el('div', undefined, 'activity-meter'); meter.setAttribute('aria-hidden', 'true');
             const fill = el('span', undefined, `activity-meter-fill${node.context?.percent >= 80 ? ' near-limit' : ''}`);
             fill.style.width = `${Math.min(100, Math.max(0, node.context?.percent || 0))}%`; meter.append(fill);
-            card.replaceChildren(title, el('span', modelText(node), 'activity-model'), meter,
+            card.replaceChildren(title, el('span', modelWithThinking(node), 'activity-model'), meter,
                 el('span', nodeContextText(node), 'activity-context'), el('span', node.currentTool ? `${activeNode(node) ? '↳' : 'Last observed tool:'} ${node.currentTool}` : node.id === 'parent' && !snapshot.subagentsAvailable && !snapshot.sessionTracking?.available ? 'Subagent telemetry not connected' : node.kind, 'activity-tool'));
+            const progress = progressFor(node);
+            if (progress) {
+                const report = el('div', undefined, 'activity-progress');
+                report.id = `activity-progress-${node.id}`;
+                card.setAttribute('aria-describedby', `activity-${position.group}-heading ${report.id}`);
+                const text = el('span', progress.text, 'activity-progress-text');
+                const seconds = age(progress.at), elapsed = seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
+                const stamp = el('time', `Last update · ${elapsed} ago`);
+                stamp.dateTime = new Date(progress.at).toISOString();
+                report.append(text, stamp); card.append(report);
+            }
         });
         for (const card of existing.values()) card.remove();
         drawEdges(positions, width, height);
@@ -400,25 +416,24 @@
         detail.append(el('h3', nodeLabel(node)));
         const row = (label, value) => { const line = el('p'); line.append(el('span', `${label} `, 'activity-detail-label'), document.createTextNode(value)); detail.append(line); };
         row('Status', observationStatus(node) === 'closed' ? 'closed' : node.state);
-        if (historyNode(node)) row('View', node.observation
-            ? 'Recent history · observer closed; not current activity. Closure does not establish native task success.'
-            : 'Recent history · terminal native status, not current activity.');
+        if (historyNode(node)) row('View', 'Recent history');
         if (node.model) row(modelLabel(node), node.model);
+        if (node.thinking) row('Selected thinking', node.thinking);
         row('Context', nodeContextText(node));
+        const progress = progressFor(node);
+        if (progress) { row('Progress', progress.text); row('Reported', time(progress.at)); }
         if (node.observation) {
             const observed = node.observation;
-            row('Source', `Pi session events · ${observationStatus(node)} · ${time(observed.observedAt)}`);
-            row('Identity', 'Observed SDK session, not an agent role or native run/attempt. Native run status is not shown or merged with these observations.');
-            row('Ancestry', observed.ancestry === 'file-reference'
-                ? 'Historical header parent-file reference; parent UUID and current delegation are not established.'
-                : observed.ancestry === 'ambiguous' ? 'Conflicting parent/file identities; ancestry is unavailable.' : 'Parent session not observed in this view.');
+            row('Updated', `${observationStatus(node)} · ${time(observed.observedAt)}`);
+            row('Parent', observed.ancestry === 'file-reference'
+                ? 'Historical parent-file link'
+                : observed.ancestry === 'ambiguous' ? 'Conflicting identities' : 'Unknown');
             if (observed.selectedModel) row('Selected model', observed.selectedModel);
             if (observed.modelObservedAt) row('Response observed', time(observed.modelObservedAt));
-            if (typeof node.lastInputTokens === 'number' && observed.lastInputObservedAt) row('Last successful input', `${number(node.lastInputTokens)} · ${time(observed.lastInputObservedAt)} · historical, not current occupancy`);
-            row('Refresh', 'Child feeds refresh here while the parent observer is running.');
+            if (typeof node.lastInputTokens === 'number' && observed.lastInputObservedAt) row('Last successful input', `${number(node.lastInputTokens)} · ${time(observed.lastInputObservedAt)}`);
         }
-        if (node.id.startsWith('fleet:')) row('Model reading', 'Not linked to a graph node: the status API does not expose a shared identity. This may describe an agent already shown above.');
-        if (node.context) row('Measured', `${time(node.context.observedAt)} · ${node.context.basis === 'last-input' ? 'last observed input, not current occupancy' : 'Pi estimate, not an exact token count'}`);
+        if (node.id.startsWith('fleet:')) row('Model reading', 'Unlinked; may duplicate another agent');
+        if (node.context) row(node.context.basis === 'last-input' ? 'Last input at' : 'Context updated', time(node.context.observedAt));
         if (node.currentTool) row(activeNode(node) ? 'Tool' : 'Last observed tool', node.currentTool);
         const edges = (snapshot.edges || []).filter(edge => ids.has(edge.source) && ids.has(edge.target)
             && (edge.source === node.id || edge.target === node.id));
@@ -453,7 +468,7 @@
     window.addEventListener('focus', poll);
     overlay.addEventListener('change', updateOverlay);
     mobile.addEventListener('change', updateOverlay);
-    new ResizeObserver(() => { if (open && snapshot) drawEdges(new Map([...graph.querySelectorAll('.activity-node')].map(card => [card.dataset.id, { x: parseFloat(card.style.left), y: parseFloat(card.style.top), group: card.dataset.group }])), Math.max(graph.clientWidth, 270), parseFloat(graph.style.height) || 0); }).observe(graph);
+    new ResizeObserver(() => { if (open && snapshot) drawEdges(new Map([...graph.querySelectorAll('.activity-node')].map(card => [card.dataset.id, { x: parseFloat(card.style.left), y: parseFloat(card.style.top), group: card.dataset.group, height: card.offsetHeight }])), Math.max(graph.clientWidth, 270), parseFloat(graph.style.height) || 0); }).observe(graph);
     panel.addEventListener('keydown', event => {
         if (event.key === 'Escape') { event.preventDefault(); setOpen(false); }
         if (event.key === 'Tab' && overlay.matches) {

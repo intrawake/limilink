@@ -56,6 +56,7 @@ from delivery import (
     public,
 )
 from compact_rpc import CompactRPCError, compact_rpc
+from pi_output import PiResponseError, pi_json_reply
 from session_lease import SessionLeaseBusy, pi_lease_command, session_lease
 from session_snapshot import cached_reply_evidence, history_snapshot
 from session_activity import activity_snapshot
@@ -1517,7 +1518,7 @@ async def _process_chat(
 
         # Read-only observer: no change to prompting, stdout or process lifetime.
         _add_activity_observer(agent_args, env, session_path)
-        cmd = [exepath] + agent_args + ["--continue", "-p", message]
+        cmd = [exepath] + agent_args + ["--continue", "--mode", "json", "-p", message]
 
         # Append user message to history
         append_user()
@@ -1573,7 +1574,16 @@ async def _process_chat(
 
         retcode = process.returncode
         if retcode == 0:
-            reply_text = re.sub(r".*\n\[Thought: true\]", "", stdout.decode().strip())
+            try:
+                reply_text = pi_json_reply(stdout)
+            except PiResponseError as error:
+                # JSON mode carries request failures in events, not its exit code.
+                # Preserve the existing rate/auth/provider error classification.
+                retcode, stderr = 1, error.error_message.encode()
+            except ValueError as error:
+                raise HTTPException(500, f"Agent harness failed: {error}") from error
+        if retcode == 0:
+            reply_text = re.sub(r".*\n\[Thought: true\]", "", reply_text)
             if not reply_text:
                 raise HTTPException(
                     500,
