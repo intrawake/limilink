@@ -82,6 +82,45 @@ test('child runtimes, non-owner sessions and optional wrong PID cannot write or 
   }
 });
 
+test('host-pinned fork root records activity while same-directory children remain excluded', () => {
+  const pinned = {...env,LIMILINK_ACTIVITY_ROOT_FILE:'/session/.pi/agent/session/main.jsonl',LIMILINK_ACTIVITY_ROOT_ID:'pi-id'};
+  const h = harness({env:pinned});
+  h.ctx.sessionManager.getHeader = () => ({id:'pi-id',parentSession:'/historical/original.jsonl'});
+  const child = {...h.ctx,sessionManager:{...h.ctx.sessionManager,
+    getSessionId:()=> 'child-id',getHeader:()=>({id:'child-id',parentSession:pinned.LIMILINK_ACTIVITY_ROOT_FILE}),
+    getSessionFile:()=> '/session/.pi/agent/session/child.jsonl'}};
+  h.emit('session_start',{},child);h.emit('agent_start',{},child);h.tick();
+  assert.equal(h.writes.length,0);assert.equal(h.requests.length,0);
+  h.emit('session_start');h.emit('agent_start');
+  assert.equal(h.snapshot().sessionId,'pi-id');assert.equal(h.snapshot().state,'working');
+  h.emit('tool_execution_start',{toolCallId:'root-tool',toolName:'read'});
+  assert.ok(h.snapshot().events.some(row=>row.label==='Running read'));
+  const before=h.writes.length;
+  h.emit('tool_execution_start',{toolCallId:'child-tool',toolName:'bash'},child);
+  assert.equal(h.writes.length,before);
+  h.emit('session_shutdown');
+  for (const mutate of [
+    c=>{c.sessionManager.getSessionId=()=> 'different-id';},
+    c=>{c.sessionManager.getHeader=()=>({id:'wrong-id',parentSession:'/historical/original.jsonl'});},
+    c=>{c.sessionManager.getSessionFile=()=> '/session/.pi/agent/session/other.jsonl';},
+  ]) {
+    const other=harness({env:pinned});mutate(other.ctx);other.emit('session_start');other.tick();
+    assert.equal(other.writes.length,0);assert.equal(other.requests.length,0);
+  }
+});
+
+test('incomplete or invalid root pins never fall back to unpinned ownership', () => {
+  for (const fields of [
+    {LIMILINK_ACTIVITY_ROOT_FILE:'/session/.pi/agent/session/main.jsonl'},
+    {LIMILINK_ACTIVITY_ROOT_ID:'pi-id'},
+    {LIMILINK_ACTIVITY_ROOT_FILE:'relative',LIMILINK_ACTIVITY_ROOT_ID:'pi-id'},
+    {LIMILINK_ACTIVITY_ROOT_FILE:'/session/.pi/agent/session/main.jsonl',LIMILINK_ACTIVITY_ROOT_ID:'/private/path'},
+  ]) {
+    const h=harness({env:{...env,...fields}});h.emit('session_start');h.tick();
+    assert.equal(h.writes.length,0);assert.equal(h.requests.length,0);
+  }
+});
+
 test('in-process child extension instance cannot overwrite active parent snapshot', () => {
   const snapshots = [];
   const write = (_path, snapshot) => snapshots.push(snapshot);

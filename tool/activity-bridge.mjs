@@ -83,9 +83,12 @@ export function installActivityBridge(pi, options = {}) {
   const path = env.LIMILINK_ACTIVITY_PATH;
   const sessionDir = env.LIMILINK_ACTIVITY_SESSION_DIR;
   const ownerCwd = env.LIMILINK_ACTIVITY_OWNER_CWD;
+  const rootFile = env.LIMILINK_ACTIVITY_ROOT_FILE, rootId = env.LIMILINK_ACTIVITY_ROOT_ID;
+  const pinned = rootFile !== undefined || rootId !== undefined;
   // PID alone cannot exclude local children, which share the parent's process.
   if (!path || !isAbsolute(path) || !sessionDir || !isAbsolute(sessionDir) ||
       !ownerCwd || !isAbsolute(ownerCwd) || env.PI_SUBAGENT_CHILD === '1' ||
+      (pinned && (typeof rootFile !== 'string' || !isAbsolute(rootFile) || typeof rootId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(rootId))) ||
       (env.LIMILINK_ACTIVITY_PID !== undefined && env.LIMILINK_ACTIVITY_PID !== String(pid))) return;
   const now = options.now ?? Date.now;
   const schedule = options.setInterval ?? setInterval;
@@ -102,9 +105,14 @@ export function installActivityBridge(pi, options = {}) {
     try {
       const header = candidate?.sessionManager.getHeader();
       const file = candidate?.sessionManager.getSessionFile();
-      return !!header && header.parentSession === undefined && typeof file === 'string' && isAbsolute(file) &&
+      const identity = candidate?.sessionManager.getSessionId();
+      // parentSession is historical fork provenance, not proof of child ownership.
+      // Only an exact host-pinned invocation may override the legacy restriction.
+      const root = pinned ? typeof file === 'string' && resolve(file) === resolve(rootFile)
+        && identity === rootId && header?.id === rootId : header?.parentSession === undefined;
+      return !!header && root && typeof file === 'string' && isAbsolute(file) &&
         typeof candidate.cwd === 'string' && resolve(candidate.cwd) === resolve(ownerCwd) &&
-        resolve(dirname(file)) === resolve(sessionDir) && key(candidate.sessionManager.getSessionId());
+        resolve(dirname(file)) === resolve(sessionDir) && key(identity);
     } catch { return false; }
   };
   const record = (kind, label, extra = {}) => {

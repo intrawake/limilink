@@ -47,6 +47,10 @@ printf 'The build finished.\n' | ./tool/notifyme.py
 It reads the Limilink port from the configured `config.sxpb`, defaulting to port 8000.
 A running local Limilink server is required.
 
+## `relocate_state.py`
+
+Explicit session-root migration or rollback after both services and all writers stop. Dry-run is the default; `--apply --workers-finished` moves the whole root, forks the current Pi journals using the stock SDK, and archives original journals/Activity without rewriting them. Requires `--pi-package DIR`; same-filesystem moves only. Pending operations block startup rather than silently starting empty contexts. Exact commands and interruption handling: [state directory](../doc/state-directory.md).
+
 ## `openrc_limilink_restart.sh`
 
 Schedule detached OpenRC restarts of `limilink` and `limilink-discord`. The
@@ -86,7 +90,7 @@ shows recent tool calls, paired with their results:
 ./tool/pi_session_trace.py tool 5 -v  # Full arguments/results as JSONL
 ```
 
-Use `--session PATH_OR_ID` to select a JSONL file or Limilink session ID; otherwise the script finds the current or newest local session.
+Use `--session PATH_OR_ID` to select a JSONL file or Limilink session ID; otherwise the script finds the current or newest local session. Session-ID discovery follows the server's environment/config/XDG state-root selection, not the checkout's `session/` directory.
 Compact status markers are `.` for success, `E` for error, and `?` when no result has been recorded yet.
 
 Inside Limilink, `!trace tool 5` shows the last five tool calls for the current pi session.

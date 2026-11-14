@@ -14,5 +14,4 @@
  (ENTITY.md ./pi/ENTITY.md)
  (test_target.txt ./test_target.txt)
 )
-(session_dirpath ../session)
 (port 11011)

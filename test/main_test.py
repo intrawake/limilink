@@ -329,6 +329,10 @@ async def test_continue_flag_injection(mock_exec, mock_load_config):
 
     assert "--continue" in called_args
     assert "--session-dir" in called_args
+    assert (
+        called_args[called_args.index("--session-dir") + 1]
+        == mock_exec.call_args.kwargs["env"]["LIMILINK_ACTIVITY_SESSION_DIR"]
+    )
 
 
 @pytest.mark.asyncio

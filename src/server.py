@@ -10,6 +10,7 @@ import uvicorn
 
 import otel_setup
 from main import app, get_sessions_dir, load_config
+from runtime_paths import config_path
 
 
 class EndpointFilter(logging.Filter):
@@ -22,13 +23,10 @@ def main():
     parser.add_argument(
         "--port", type=int, default=None, help="Port to run the server on"
     )
-    xdg_config_dirpath = os.environ.get("XDG_CONFIG_HOME", "")
-    if not xdg_config_dirpath:
-        xdg_config_dirpath = os.path.join(os.path.expanduser("~"), ".config")
     parser.add_argument(
         "--config",
         type=str,
-        default=os.path.join(xdg_config_dirpath, "limilink", "config.sxpb"),
+        default=config_path(),
         help="Path to config.sxpb",
     )
     args, _ = parser.parse_known_args()
@@ -56,7 +54,7 @@ def main():
         port = args.port
 
     sessions_dir = get_sessions_dir(cfg, config_dir)
-    os.makedirs(sessions_dir, exist_ok=True)
+    os.makedirs(sessions_dir, mode=0o700, exist_ok=True)
     pid_file = os.path.join(sessions_dir, "server.pid")
 
     def cleanup():
@@ -110,7 +108,7 @@ def main():
 
     try:
         server.run()
-    except (KeyboardInterrupt, SystemExit):
+    except KeyboardInterrupt:
         pass
     except Exception as e:
         print(f"Server error: {e}")

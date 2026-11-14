@@ -19,6 +19,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from runtime_paths import config_path, get_sessions_dir
+
 DEFAULT_COUNT = 10
 MAX_COUNT = 100
 MAX_SUMMARY_LENGTH = 240
@@ -197,10 +200,13 @@ def find_session_file(session: str | None = None) -> Path | None:
 
 
 def _sessions_root() -> Path:
-    configured = os.environ.get("LIMILINK_SESSIONS_DIR")
-    if configured:
-        return Path(configured).expanduser()
-    return Path(__file__).resolve().parent.parent / "session"
+    if os.environ.get("LIMILINK_SESSIONS_DIR"):
+        return Path(get_sessions_dir({}, ""))
+    try:
+        from .notifyme import load_config
+    except ImportError:
+        from notifyme import load_config
+    return Path(get_sessions_dir(load_config(), os.path.dirname(config_path())))
 
 
 def _newest_jsonl(path: Path) -> Path | None:

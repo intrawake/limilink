@@ -16,6 +16,7 @@ from discord.ext import tasks
 
 import otel_setup
 from main import get_sessions_dir, load_config
+from runtime_paths import assert_state_ready
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,8 @@ if cfg:
         TOKEN = str(cfg["discord_bot_token"])
 
 sessions_dir = get_sessions_dir(cfg, config_dir)
-os.makedirs(sessions_dir, exist_ok=True)
+assert_state_ready(sessions_dir)
+os.makedirs(sessions_dir, mode=0o700, exist_ok=True)
 
 # PID file management
 pid_file = os.path.join(sessions_dir, "bot.pid")

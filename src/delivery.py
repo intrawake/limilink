@@ -24,6 +24,7 @@ from fastapi import HTTPException
 
 from send_receipt import SendConflict, SendIndeterminate, read_send, receipt_path
 from recovery import Recovery, acknowledged, read_ledger
+from runtime_paths import assert_state_ready
 
 TERMINAL = {
     "succeeded",
@@ -224,7 +225,8 @@ class DeliveryOwner:
         recovery_admission: Callable | None = None,
     ):
         self.root = root.resolve()
-        self.root.mkdir(parents=True, exist_ok=True)
+        assert_state_ready(self.root)
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd = lock_file(self.root / ".delivery-owner")
         if fd is None:
             raise RuntimeError(

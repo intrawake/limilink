@@ -8,6 +8,12 @@ Activity enriches existing SDK child-session cards. Role metadata never creates 
 
 Progress is intentionally content-bearing. It may include a path or other sensitive text the child explicitly reported; display escaping is not secret redaction. General tool arguments/results, tasks, goals, assistant text and decision/interview requests are not exported.
 
+## Invocation ownership
+
+For an unambiguous existing continuation, the host pins the same absolute journal path and UUID for both the public CLI `--session` selection and the observer. A fork's `parentSession` is historical provenance, not proof that the current invocation is a child. Exact pins, cwd/directory checks and child-process/PID guards exclude other runtimes, including children in the same directory. Invalid explicit pins fail closed. When metadata cannot be pinned, Pi keeps native discovery and the observer retains its unpinned ancestry restriction.
+
+The host supplies an absolute session directory so genuinely new sessions also publish an absolute SDK file identity. No old Activity family is adopted or reconstructed by these ownership checks.
+
 ## Bounds and recovery
 
 Child collectors share the existing private family transport: at most 128 fixed slots, each at most 8 KiB with a 12-event tail and 16 role facts. The root retains at most 256 role facts privately, including conflict/limit evidence, across ordinary per-turn process recreation. Role uncertainty is monotonic: losing a collector or crossing a limit cannot silently turn a conflict into a named role. A closed source carrying role evidence is reclaimed only after the aggregate ledger has been successfully persisted; a failed write leaves that source available to the next process.
@@ -18,7 +24,8 @@ The browser receives only role, thinking and progress fields, not session paths,
 
 ## Verification
 
-- `pdm run test` runs Python and Node regressions.
+- `pdm run test` runs Python and Node regressions, including pinned fork roots, invalid pins and same-directory children starting before their parent.
+- `PI_RELOCATE_PACKAGE=/absolute/pi-package .venv/bin/python test/relocate_state_native_smoke.py` checks the full host-pin/bridge/validated Activity path before and after relocation, not only child-tracking registration.
 - `test/activity_sessions_browser.js` covers roles, progress, text injection, geometry and desktop/phone behavior against the disposable sidebar preview.
 - `PI_PROOF_NPM_ROOT=/absolute/node_modules node test/activity_sessions_native_smoke.mjs` is an opt-in installed-stock SDK test pinned to pi-subagents 0.88.0. It uses scripted local responses and blocks network connections; it is not an LLM test.
 

@@ -32,6 +32,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, StrictBool, field_validator
 from session_media import MediaStore, PRIVATE as MEDIA_HEADERS
+from runtime_paths import config_path, get_sessions_dir
+from pi_session import continued_session_identity
 
 from session_layout import (
     SESSION_STAGING_PREFIX,
@@ -231,6 +233,18 @@ def _add_activity_observer(args: list[str], env: dict[str, str], session_path: s
     env["LIMILINK_ACTIVITY_PATH"] = str(owner / ".activity.json")
     env["LIMILINK_ACTIVITY_OWNER_CWD"] = str(owner)
     env["LIMILINK_ACTIVITY_SESSION_DIR"] = str(owner / ".pi" / "agent" / "session")
+    # Pin the observer to the very same journal the public CLI will open.
+    # Inherited/preset identity claims must never authorize a different scope.
+    env.pop("LIMILINK_ACTIVITY_ROOT_FILE", None)
+    env.pop("LIMILINK_ACTIVITY_ROOT_ID", None)
+    identity = continued_session_identity(owner)
+    if identity is None:
+        args.append("--continue")
+    else:
+        file, uuid = identity
+        args.extend(["--session", str(file)])
+        env["LIMILINK_ACTIVITY_ROOT_FILE"] = str(file)
+        env["LIMILINK_ACTIVITY_ROOT_ID"] = uuid
 
 
 # Base directory for isolated sessions
@@ -264,12 +278,7 @@ def sanitize_session_id(session_id: str) -> str:
 
 
 def load_config() -> tuple[dict[Any, Any], str]:
-    xdg_config_dirpath = os.environ.get("XDG_CONFIG_HOME", "")
-    if not xdg_config_dirpath:
-        xdg_config_dirpath = os.path.join(os.path.expanduser("~"), ".config")
-    config_filepath = os.environ.get(
-        "LIMILINK_CONFIG", os.path.join(xdg_config_dirpath, "limilink", "config.sxpb")
-    )
+    config_filepath = config_path()
     config_dirpath = os.path.dirname(config_filepath)
     if not os.path.exists(config_filepath):
         return {}, config_dirpath
@@ -290,23 +299,6 @@ def global_env_dict(cfg: dict[Any, Any]) -> dict[str, str]:
             if isinstance(value, str):
                 env[name] = value
     return env
-
-
-def get_sessions_dir(cfg: dict[Any, Any], config_dir: str) -> str:
-    env_sessions_dir = os.environ.get("LIMILINK_SESSIONS_DIR")
-    if env_sessions_dir:
-        return os.path.abspath(env_sessions_dir)
-
-    session_dirpath = cfg.get("session_dirpath")
-    if session_dirpath:
-        session_dirpath = os.path.expanduser(session_dirpath)
-        if not os.path.isabs(session_dirpath):
-            session_dirpath = os.path.normpath(
-                os.path.join(config_dir, session_dirpath)
-            )
-        return session_dirpath
-    # Default to "session" in the project root (assumed to be parent of src)
-    return os.path.join(os.path.dirname(__file__), "..", "session")
 
 
 def get_session_tmp_dir(session_path: str) -> str:
@@ -476,7 +468,7 @@ def ensure_session_initialized(
 async def list_sessions():
     cfg, config_dir = load_config()
     sessions_dir = get_sessions_dir(cfg, config_dir)
-    os.makedirs(sessions_dir, exist_ok=True)
+    os.makedirs(sessions_dir, mode=0o700, exist_ok=True)
     try:
         sessions = []
         if os.path.exists(sessions_dir):
@@ -506,7 +498,7 @@ class SessionOrderRequest(BaseModel):
 def session_layout_root() -> Path:
     cfg, config_dir = load_config()
     root = Path(get_sessions_dir(cfg, config_dir))
-    root.mkdir(parents=True, exist_ok=True)
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
     return root
 
 
@@ -640,7 +632,7 @@ async def create_session(agent: str | None = None):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     root = Path(sessions_dir)
-    root.mkdir(parents=True, exist_ok=True)
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
     # Build on the same filesystem, but outside the discoverable/admissible
     # session namespace. No awaited initializer write follows publication.
     with tempfile.TemporaryDirectory(
@@ -1359,14 +1351,14 @@ async def _process_chat(
             write_pi_settings_json(session_path, current_reasoning_effort)
 
             exepath = cfg.get("pi_agent_exepath", "pi-agent")
-            rpc_args = ["--approve", "--mode", "rpc", "--continue"]
+            rpc_args = ["--approve", "--mode", "rpc"]
             provider_name = preset.get("provider")
             if provider_name:
                 rpc_args += ["--provider", provider_name]
             rpc_args += ["--model", current_model]
             if current_reasoning_effort:
                 rpc_args += ["--thinking", current_reasoning_effort]
-            rpc_args += ["--session-dir", ".pi/agent/session"]
+            rpc_args += ["--session-dir", os.path.join(pi_agent_dir, "session")]
 
             rpc_env = os.environ.copy()
             rpc_env["PI_CODING_AGENT_DIR"] = pi_agent_dir
@@ -1477,7 +1469,7 @@ async def _process_chat(
             # A continued Pi session restores its recorded thinking level in
             # preference to defaults, so this must be an explicit CLI option.
             agent_args += ["--thinking", current_reasoning_effort]
-        agent_args += ["--session-dir", ".pi/agent/session"]
+        agent_args += ["--session-dir", os.path.join(pi_agent_dir, "session")]
         # Specification of --session on the first run of a new session directory
         # causes "No session found matching..." error. pi-agent should just
         # use the isolated directory naturally.
@@ -1518,7 +1510,7 @@ async def _process_chat(
 
         # Read-only observer: no change to prompting, stdout or process lifetime.
         _add_activity_observer(agent_args, env, session_path)
-        cmd = [exepath] + agent_args + ["--continue", "--mode", "json", "-p", message]
+        cmd = [exepath] + agent_args + ["--mode", "json", "-p", message]
 
         # Append user message to history
         append_user()

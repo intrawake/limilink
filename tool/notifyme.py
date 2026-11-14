@@ -4,6 +4,10 @@ import json
 import os
 import sys
 import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from runtime_paths import config_path
 
 
 def load_config():
@@ -13,12 +17,7 @@ def load_config():
         print("Warning: sxpb not found, using default port 8000.", file=sys.stderr)
         return {}
 
-    xdg_config_dirpath = os.environ.get("XDG_CONFIG_HOME", "")
-    if not xdg_config_dirpath:
-        xdg_config_dirpath = os.path.join(os.path.expanduser("~"), ".config")
-    config_filepath = os.environ.get(
-        "LIMILINK_CONFIG", os.path.join(xdg_config_dirpath, "limilink", "config.sxpb")
-    )
+    config_filepath = config_path()
     if not os.path.exists(config_filepath):
         return {}
     try:

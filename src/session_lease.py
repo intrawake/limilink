@@ -27,7 +27,7 @@ def session_lease(root: Path, session_id: str, *, exclusive: bool = False):
     # replacing one could allow a second lock while an agent holds the old inode.
     if not session_id or "/" in session_id or session_id in (".", ".."):
         raise ValueError("Invalid session lease ID")
-    root.mkdir(parents=True, exist_ok=True)
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd = os.open(
         root / f".lease-{session_id}",
         os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
