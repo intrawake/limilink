@@ -214,7 +214,7 @@ function updateInputState() {
     const status = deliveryStatus(currentSession);
     byId('typing').hidden = !status && !busy;
     byId('typing').textContent = pending.some(item => ['staged', 'sending'].includes(item.state)) ? 'Sending…'
-        : ['Acceptance unknown', 'Effects unknown'].includes(status) ? status : busy ? 'Thinking…' : status;
+        : ['Acceptance unknown', 'Effects unknown', 'Running', 'Queued'].includes(status) ? status : busy ? 'Session busy…' : status;
 
 }
 
@@ -1500,7 +1500,7 @@ async function initialize() {
     setSidebarBusy(true);
     try {
         await Promise.all([
-            globalThis.LimilinkHistory?.version === 3 ? null : import('/history-view.js?v=3'),
+            globalThis.LimilinkHistory?.version === 4 ? null : import('/history-view.js?v=4'),
             globalThis.LimilinkReplies ? null : import('/reply-state.js?v=1'),
         ]);
         replies = globalThis.LimilinkReplies.create();

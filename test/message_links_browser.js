@@ -7,7 +7,7 @@ async page => {
     // The current controller must upgrade a stale helper without an old UI copy.
     const entry = page.url();
     const html = (await (await page.request.get(entry)).text())
-        .replace('    <script src="/history-view.js?v=3" defer></script>\n', '<script>globalThis.LimilinkHistory={version:2,create(){throw Error("Stale helper used");}}</script>\n')
+        .replace('    <script src="/history-view.js?v=4" defer></script>\n', '<script>globalThis.LimilinkHistory={version:2,create(){throw Error("Stale helper used");}}</script>\n')
         .replace('    <script src="/reply-state.js?v=1" defer></script>\n', '');
     await page.route(entry, route => route.fulfill({ body: html, contentType: 'text/html' }));
     const bot = content => ({ role: 'bot', content });
@@ -39,7 +39,7 @@ async page => {
         await page.reload();
         await page.waitForFunction(() => historyReady && currentSession === 'session_c' && !sendButton.disabled);
         await page.evaluate(() => { globalThis.__linkXss = 0; });
-        check(await page.evaluate(() => globalThis.LimilinkHistory.version) === 3, 'Cached helper was not upgraded');
+        check(await page.evaluate(() => globalThis.LimilinkHistory.version) === 4, 'Cached helper was not upgraded');
         const chat = page.locator('#chat-container');
         const labelled = chat.getByRole('link', { name: 'Labelled', exact: true });
         check(await chat.locator('a').count() === 6, 'Wrong initial link count');

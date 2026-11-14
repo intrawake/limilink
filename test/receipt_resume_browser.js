@@ -42,7 +42,7 @@ async page => {
         await page.evaluate(() => syncOperations());
         check(posts.length === 1, 'Reload replayed accepted or unsent text');
         check(await page.locator('#unconfirmed-text').textContent() === 'Later staged, not sent', 'Reload lost staged text');
-        check((await page.locator('#typing').textContent()) === 'Thinking…', 'Known running operation not recovered');
+        check((await page.locator('#typing').textContent()) === 'Running', 'Known running operation not recovered');
         await input.fill('Keep restored draft');
         await page.locator('#restore-unconfirmed').click();
         check(await input.inputValue() === 'Keep restored draft\n\nLater staged, not sent', 'Explicit restore overwrote or duplicated draft');

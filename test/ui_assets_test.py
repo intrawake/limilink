@@ -34,9 +34,11 @@ def test_current_entry_references_only_available_assets():
         assert set(assets.urls) == {
             "/arrange.css",
             "/activity.css",
-            "/history-view.js?v=3",
+            "/media.css",
+            "/history-view.js?v=4",
             "/reply-state.js?v=1",
             "/follow.js",
+            "/media.js",
             "/activity.js",
         }
         for url in assets.urls:

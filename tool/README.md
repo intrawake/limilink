@@ -3,6 +3,17 @@
 These executable helpers support Limilink sessions, notifications, service management, and local pi-agent session inspection.
 Examples below run from the repository root.
 
+## `share_media.py`
+
+Copy a completed local image/audio file into the current session's **Pins** sidebar, without Drive, chat execution or Discord outbox consumption:
+
+```sh
+./tool/share_media.py /path/to/picture.png
+./tool/share_media.py /path/to/voice.mp3 --session session_example
+```
+
+The shelf provides previews, audio controls and original downloads. It follows the session's Trash/Undo/deletion lifetime. The helper prints the publication identity before transport, streams once and never retries automatically; observe the exact ID after response loss. Use `--publication-id` for deliberate reuse and `--server http://127.0.0.1:PORT` for a disposable local preview. Sharing inherits Limilink's existing network perimeter, not separate link authentication. See [session media](../doc/session-media.md) for formats, quotas, endpoints and safety limits.
+
 ## `limilink_continue_after.py`
 
 Run a command, wait briefly for an immediate result, and notify the current Limilink session when it eventually finishes.

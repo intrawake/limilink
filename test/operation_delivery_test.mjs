@@ -94,7 +94,7 @@ test('reload recovers accepted queued/running work without resubmission', async 
     gets(ui)[0].respond({ operations: [operation(posts(first)[0], 'running', 1)] });
     await ui.flush();
     assert.equal(posts(ui).length, 0);
-    assert.equal(ui.node('typing').textContent, 'Thinking…');
+    assert.equal(ui.node('typing').textContent, 'Running');
     assert.equal(ui.node('unconfirmed-send').hidden, true);
 });
 
@@ -104,10 +104,10 @@ test('queued is not running; stale GET revision cannot overwrite a newer admissi
     ui.run('void syncOperations();');
     posts(ui)[0].respond({ operation: operation(posts(ui)[0], 'running', 2) }, 202);
     await ui.flush();
-    assert.equal(ui.node('typing').textContent, 'Thinking…');
+    assert.equal(ui.node('typing').textContent, 'Running');
     gets(ui)[0].respond({ operations: [operation(posts(ui)[0], 'queued', 1)] });
     await ui.flush();
-    assert.equal(ui.node('typing').textContent, 'Thinking…');
+    assert.equal(ui.node('typing').textContent, 'Running');
     ui.run('void syncOperations();');
     gets(ui).at(-1).respond({ operations: [operation(posts(ui)[0], 'succeeded', 3, { outcome: { status: 200, body: { reply: 'done' } } })] });
     await ui.flush();

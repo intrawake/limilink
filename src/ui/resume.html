@@ -8,9 +8,11 @@
     <link rel="icon" href="/favicon.svg?v=12" type="image/svg+xml" sizes="any">
     <link rel="stylesheet" href="/arrange.css">
     <link rel="stylesheet" href="/activity.css">
-    <script src="/history-view.js?v=3" defer></script>
+    <link rel="stylesheet" href="/media.css">
+    <script src="/history-view.js?v=4" defer></script>
     <script src="/reply-state.js?v=1" defer></script>
     <script src="/follow.js" defer></script>
+    <script src="/media.js" defer></script>
     <script src="/activity.js" defer></script>
 </head>
 <body>
@@ -35,6 +37,7 @@
                     <h1 id="session-title">Limilink</h1>
                     <span id="session-directory"></span>
                 </div>
+                <button id="media-toggle" class="quiet-button" aria-controls="session-media" aria-expanded="false">Pins</button>
                 <button id="activity-toggle" class="quiet-button" aria-controls="activity-panel" aria-expanded="false">Activity</button>
             </header>
             <div id="notice" role="status" hidden></div>
@@ -52,13 +55,24 @@
                 <button id="dismiss-unconfirmed" class="quiet-button">Dismiss</button>
             </div>
             <div id="chat-container" role="log" aria-label="Conversation" aria-busy="false"></div>
-            <div id="typing" role="status" hidden>Thinking…</div>
+            <div id="typing" role="status" hidden>Session busy…</div>
             <div id="input-area">
                 <label class="visually-hidden" for="message-input">Message</label>
                 <textarea id="message-input" placeholder="Message…" rows="1" disabled></textarea>
                 <button id="send-btn">Send</button>
             </div>
         </main>
+        <button id="media-backdrop" aria-label="Close pins" tabindex="-1" hidden></button>
+        <aside id="session-media" aria-label="Pinned media" hidden>
+            <div class="activity-heading">
+                <h2 id="media-summary">Pins</h2>
+                <button id="media-close" class="icon-button" aria-label="Close pins">×</button>
+            </div>
+            <div id="media-body">
+                <p id="media-status" role="status"></p>
+                <div id="media-items" aria-label="Session images and audio"></div>
+            </div>
+        </aside>
         <button id="activity-backdrop" aria-label="Close activity" tabindex="-1" hidden></button>
         <aside id="activity-panel" aria-label="Agent activity" hidden>
             <div class="activity-heading">

@@ -112,7 +112,7 @@ test('canonical optimistic coverage uses only unique explicit USER IDs; prefix i
     const source = await readFile(new URL('../src/ui/history-view.js', import.meta.url), 'utf8');
     const context = vm.createContext({ URL }); vm.runInContext(source, context);
     const helper = context.LimilinkHistory, id = 'a'.repeat(32);
-    assert.equal(helper.version, 3);
+    assert.equal(helper.version, 4);
     assert.equal(helper.canonicalSendIds([{role:'bot',content:'same',request_id:id}]).size, 0);
     assert.equal(helper.canonicalSendIds([{role:'user',content:'same',request_id:id}]).has(id), true);
     assert.equal(helper.canonicalSendIds([{role:'user',content:'same',request_id:id},{role:'user',content:'same',request_id:id}]).size, 0);

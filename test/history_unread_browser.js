@@ -7,7 +7,7 @@ async page => {
     // Exercise helper bootstrap when cached HTML lacks the helper tags.
     const entry = page.url();
     const html = (await (await page.request.get(entry)).text())
-        .replace('    <script src="/history-view.js?v=3" defer></script>\n', '')
+        .replace('    <script src="/history-view.js?v=4" defer></script>\n', '')
         .replace('    <script src="/reply-state.js?v=1" defer></script>\n', '');
     await page.route(entry, route => route.fulfill({ body: html, contentType: 'text/html' }));
     const row = id => page.locator(`.session-row[data-session-id="${id}"]`);

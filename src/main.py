@@ -27,10 +27,11 @@ try:
 except ImportError:
     tracer = None
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, StrictBool, field_validator
+from session_media import MediaStore, PRIVATE as MEDIA_HEADERS
 
 from session_layout import (
     SESSION_STAGING_PREFIX,
@@ -100,6 +101,10 @@ lifecycle_gate = threading.RLock()
 session_activity: dict[tuple[str, str], int] = {}
 # Exactly one owner per canonical root, independent of HTTP request lifetimes.
 delivery_owners: dict[str, DeliveryOwner] = {}
+
+
+# Media shares lifecycle/root ownership, never the agent execution lane.
+media_stores: dict[str, MediaStore] = {}
 
 
 def project_operation(root: Path, record: dict):
@@ -1820,6 +1825,91 @@ def recovery_context(path: Path, records: list) -> dict:
             }
         ),
     }
+
+
+def get_media_store():
+    owner = get_delivery_owner()
+    key = str(owner.root)
+    store = media_stores.get(key)
+    if store is None or store.owner is not owner:
+        store = MediaStore(owner, session_admission, lifecycle_gate)
+        media_stores[key] = store
+    return store
+
+
+@contextmanager
+def media_errors(*, upload=False):
+    try:
+        yield
+    except HTTPException as exc:
+        raise HTTPException(
+            exc.status_code,
+            exc.detail,
+            headers={**(exc.headers or {}), **MEDIA_HEADERS},
+        ) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            404, "Session or media publication not found", headers=MEDIA_HEADERS
+        ) from exc
+    except TimeoutError as exc:
+        raise HTTPException(
+            408,
+            "Media upload timed out; observe the publication ID before explicitly retrying",
+            headers=MEDIA_HEADERS,
+        ) from exc
+    except (OSError, ValueError, TypeError) as exc:
+        raise HTTPException(
+            507 if upload else 409,
+            "Media publication not confirmed; use its exact metadata GET to observe it"
+            if upload
+            else "Media storage cannot be verified",
+            headers=MEDIA_HEADERS,
+        ) from exc
+
+
+@app.put("/sessions/{session_id}/media/{publication_id}")
+async def put_media(
+    session_id: str,
+    publication_id: str,
+    request: Request,
+    filename: str = Query(default=""),
+):
+    with media_errors(upload=True):
+        item, created = await get_media_store().upload(
+            session_id, publication_id, filename, request
+        )
+        return JSONResponse(
+            {"media": item}, status_code=201 if created else 200, headers=MEDIA_HEADERS
+        )
+
+
+@app.get("/sessions/{session_id}/media")
+async def list_media(
+    session_id: str, revision: str | None = Query(default=None, max_length=64)
+):
+    with media_errors():
+        return JSONResponse(
+            get_media_store().listing(session_id, revision), headers=MEDIA_HEADERS
+        )
+
+
+@app.get("/sessions/{session_id}/media/{publication_id}")
+async def get_media(session_id: str, publication_id: str):
+    with media_errors():
+        return JSONResponse(
+            {"media": get_media_store().lookup(session_id, publication_id)},
+            headers=MEDIA_HEADERS,
+        )
+
+
+@app.api_route(
+    "/sessions/{session_id}/media/{publication_id}/content", methods=["GET", "HEAD"]
+)
+async def get_media_content(
+    session_id: str, publication_id: str, request: Request, download: bool = False
+):
+    with media_errors():
+        return get_media_store().content(session_id, publication_id, request, download)
 
 
 class RecoveryRequest(BaseModel):

@@ -143,13 +143,15 @@
     function updateOverlay() {
         const modal = open && overlay.matches;
         backdrop.hidden = !modal;
-        document.getElementById('conversation').inert = modal || app.classList.contains('sidebar-open');
-        document.getElementById('session-sidebar').inert = modal || (mobile.matches && !app.classList.contains('sidebar-open'));
+        const pinsModal = !document.getElementById('session-media').hidden && overlay.matches;
+        document.getElementById('conversation').inert = modal || pinsModal || app.classList.contains('sidebar-open');
+        document.getElementById('session-sidebar').inert = modal || pinsModal || (mobile.matches && !app.classList.contains('sidebar-open'));
         panel.setAttribute('role', modal ? 'dialog' : 'complementary');
         if (modal) panel.setAttribute('aria-modal', 'true');
         else panel.removeAttribute('aria-modal');
     }
     function setOpen(value, restoreFocus = true) {
+        if (value) document.dispatchEvent(new CustomEvent('limilink:panel', {detail: 'activity'}));
         open = value;
         panel.hidden = !value;
         toggle.setAttribute('aria-expanded', String(value));
@@ -442,6 +444,9 @@
     toggle.addEventListener('click', () => setOpen(!open));
     close.addEventListener('click', () => setOpen(false));
     backdrop.addEventListener('click', () => setOpen(false));
+    document.addEventListener('limilink:panel', event => {
+        if (event.detail !== 'activity' && open) setOpen(false, false);
+    });
     document.addEventListener('limilink:session', changedSession);
     document.addEventListener('limilink:human-send', humanSend);
     document.addEventListener('visibilitychange', () => { if (document.hidden) cancel(); else poll(); });

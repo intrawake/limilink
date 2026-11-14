@@ -81,18 +81,45 @@
         return parts;
     }
 
+    // Line-delimited fences follow sxpb-llm's rule: the closing run must use
+    // the same character and be at least as long as the opening run.
+    function fenceParts(text) {
+        const parts = [];
+        let opening = null, plain = 0;
+        for (const line of text.matchAll(/[^\n]*\n|[^\n]+$/g)) {
+            const source = line[0].replace(/\r?\n$/, '');
+            const match = /^[ \t]*(`{3,}|~{3,})([^\r\n]*)$/.exec(source);
+            if (!match) continue;
+            const run = match[1], info = match[2];
+            if (opening) {
+                if (run[0] !== opening.char || run.length < opening.length || !/^[ \t]*$/.test(info)) continue;
+                parts.push({text: text.slice(opening.content, line.index), code: true});
+                plain = line.index + line[0].length; opening = null;
+            } else {
+                if (run[0] === '`' && info.includes('`')) continue;
+                if (line.index > plain) parts.push({text: text.slice(plain, line.index)});
+                // Preserve the info string as displayed by the existing renderer.
+                opening = {char: run[0], length: run.length, start: line.index,
+                    content: line.index + source.length - info.length};
+            }
+        }
+        if (opening) parts.push({text: text.slice(opening.start), literal: true});
+        else if (plain < text.length || !parts.length) parts.push({text: text.slice(plain)});
+        return parts;
+    }
+
     function message(item) {
         const node = document.createElement('div');
         node.className = `message ${item.role === 'user' ? 'user' : 'bot'}`;
         if (item.role === 'user' && validSendId(item.request_id)) node.dataset.requestId = item.request_id;
-        String(item.content).split(/```([\s\S]*?)```/g).forEach((part, index) => {
-            if (index % 2) {
+        fenceParts(String(item.content)).forEach(part => {
+            if (part.code) {
                 const pre = document.createElement('pre');
                 const code = document.createElement('code');
-                code.textContent = part;
+                code.textContent = part.text;
                 pre.append(code);
                 node.append(pre);
-            } else for (const piece of linkParts(part, document.baseURI)) {
+            } else for (const piece of part.literal ? [{text: part.text}] : linkParts(part.text, document.baseURI)) {
                 if (!piece.href) node.append(document.createTextNode(piece.text));
                 else {
                     const link = document.createElement('a');
@@ -229,5 +256,5 @@
             start() { return start; },
         };
     }
-    globalThis.LimilinkHistory = { version: 3, create, isPrefix, canonicalSendIds, linkParts, pageSize: PAGE };
+    globalThis.LimilinkHistory = { version: 4, create, isPrefix, canonicalSendIds, linkParts, fenceParts, pageSize: PAGE };
 })();

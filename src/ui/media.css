@@ -1,0 +1,19 @@
+#media-toggle { white-space: nowrap; font-size: 13px; }
+#media-toggle[aria-expanded="true"] { color: #ffd2ce; border-color: #78505b; background: #302a32; }
+#session-media { width: 380px; flex: 0 0 380px; min-height: 0; display: flex; flex-direction: column; background: var(--panel); border-left: 1px solid var(--line); font-size: 13px; }
+#media-body { overflow: auto; min-height: 0; padding: 14px 12px 24px; scrollbar-gutter: stable; }
+#media-status { margin: 0 0 14px; color: var(--muted); overflow-wrap: anywhere; }
+#media-items { display: flex; flex-direction: column; gap: 20px; }
+#media-items figure { margin: 0; min-width: 0; }
+#media-items img { display: block; max-width: 100%; max-height: 45svh; object-fit: contain; }
+#media-items audio { display: block; width: 100%; }
+#media-items figcaption { margin: 6px 0; overflow-wrap: anywhere; }
+#media-items small { display: block; margin: 6px 0; color: var(--muted); }
+#media-items a { color: #9cbcff; }
+#media-backdrop { position: fixed; inset: 0; z-index: 11; background: #080a0eb3; border: none; }
+@media (max-width: 1180px) {
+    #session-media { position: fixed; inset: 0 0 0 auto; z-index: 12; width: min(400px, calc(100vw - 32px)); }
+}
+@media (max-width: 720px) {
+    #media-toggle { padding: 6px 8px; }
+}

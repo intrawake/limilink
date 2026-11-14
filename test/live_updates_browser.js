@@ -25,7 +25,7 @@ async page => {
 
     // A second client's activity must appear even with no local send promise.
     const external = page.request.post(`${base}/chat`, { data: { session_id: 'session_a', message: 'External typing check' } });
-    await page.waitForFunction(() => !document.querySelector('#typing').hidden && document.querySelector('#typing').textContent === 'Thinking…');
+    await page.waitForFunction(() => !document.querySelector('#typing').hidden && ['Running', 'Session busy…'].includes(document.querySelector('#typing').textContent));
     check(send && await send.isEnabled(), 'Server busy blocked an independent follow-up Send');
     check((await external).ok(), 'Fake external chat failed');
     await page.waitForFunction(() => document.querySelector('#chat-container').textContent.includes('Fixture reply: External typing check') && document.querySelector('#typing').hidden);
@@ -67,7 +67,7 @@ async page => {
         });
         await input.fill(firstText);
         await send.click();
-        await page.waitForFunction(() => document.querySelector('#typing').textContent === 'Thinking…');
+        await page.waitForFunction(() => document.querySelector('#typing').textContent === 'Running');
         await input.fill(`Draft kept across resume ${suffix}`);
         await setVisibility('hidden');
         const hiddenCount = snapshots;
@@ -75,7 +75,9 @@ async page => {
         await page.waitForTimeout(2200);
         check(snapshots === hiddenCount, 'Hidden page kept polling');
         await setVisibility('visible');
-        await page.waitForFunction(text => document.querySelector('#chat-container').textContent.includes(`Fixture reply: ${text}`) && !document.querySelector('#send-btn').disabled, firstText);
+        // History and authoritative operation status arrive independently;
+        // an enabled Send button no longer means the prior turn is terminal.
+        await page.waitForFunction(text => document.querySelector('#chat-container').textContent.includes(`Fixture reply: ${text}`) && document.querySelector('#typing').hidden && !document.querySelector('#send-btn').disabled, firstText);
         check(await page.locator('#typing').isHidden(), 'Recovered server-idle state stayed typing');
         check(await input.inputValue() === `Draft kept across resume ${suffix}`, 'Recovery overwrote a newer draft');
         check(await page.locator('#unconfirmed-send').isHidden(), 'Completed Send receipt was incorrectly called uncertain');
@@ -93,7 +95,7 @@ async page => {
         check(await page.locator('#unconfirmed-send').isHidden(), 'Old POST resurrected a dismissed recovery notice');
         const secondResponse = await secondRoute.fetch();
         await secondRoute.fulfill({ response: secondResponse });
-        await page.waitForFunction(text => document.querySelector('#chat-container').textContent.includes(`Fixture reply: ${text}`) && !document.querySelector('#send-btn').disabled, secondText);
+        await page.waitForFunction(text => document.querySelector('#chat-container').textContent.includes(`Fixture reply: ${text}`) && document.querySelector('#typing').hidden && !document.querySelector('#send-btn').disabled, secondText);
         const messages = await page.locator('.message').allTextContents();
         check(messages.filter(text => text === secondText).length === 1, 'Newer user message duplicated');
         check(messages.filter(text => text === `Fixture reply: ${secondText}`).length === 1, 'Newer reply duplicated');
@@ -113,7 +115,7 @@ async page => {
             signal: controller.signal,
         }).catch(() => {});
     }, disconnectedText);
-    await page.waitForFunction(() => !document.querySelector('#typing').hidden && document.querySelector('#typing').textContent === 'Thinking…');
+    await page.waitForFunction(() => !document.querySelector('#typing').hidden && ['Running', 'Session busy…'].includes(document.querySelector('#typing').textContent));
     await page.evaluate(() => window.transportAbort.abort());
     await page.waitForFunction(text => document.querySelector('#chat-container').textContent.includes(`Fixture reply: ${text}`) && document.querySelector('#typing').hidden, disconnectedText);
     await ready();
